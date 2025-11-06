@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: lightning_db
+    environment:
+      POSTGRES_DB: lightning
+      POSTGRES_USER: lightning_user
+      POSTGRES_PASSWORD: lightning_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lightning_user -d lightning"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ingestion:
+    build:
+      context: .
+      dockerfile: Dockerfile.ingestion
+    container_name: lightning_ingestion
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: lightning
+      POSTGRES_USER: lightning_user
+      POSTGRES_PASSWORD: lightning_pass
+      POSTGRES_PORT: 5432
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: lightning_api
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: lightning
+      POSTGRES_USER: lightning_user
+      POSTGRES_PASSWORD: lightning_pass
+      POSTGRES_PORT: 5432
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
