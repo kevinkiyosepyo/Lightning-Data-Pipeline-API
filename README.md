@@ -1,5 +1,5 @@
 # Lightning-Data-Pipeline-API
-Real-time lightning strike data pipeline built with Python, FastAPI, PostgreSQL, and Docker. Ingests live data from the Blitzortung's WebSocket feed and stores it in a database.
+Real-time lightning strike data pipeline built with Python, FastAPI, PostgreSQL, and Docker. Ingests live data from the Blitzortung's WebSocket feed and stores it in a database: https://www.blitzortung.org/
 
 Features: 
 1. Real-time Data Ingestion: WebSocket connection to Blitzortung's global lightning detection network
