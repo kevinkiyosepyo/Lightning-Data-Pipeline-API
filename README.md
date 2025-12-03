@@ -221,7 +221,6 @@ Ensure all services show "Up" status.
 
 ## Contributing
 
-This is an active learning project so contributions are welcome. 
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/-feature`)
