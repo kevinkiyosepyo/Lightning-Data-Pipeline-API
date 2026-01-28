@@ -54,15 +54,12 @@ This pipeline provides a queryable, real-time data source for these applications
 ## Quick Start
 
 ```bash
-# Clone and start
 git clone https://github.com/kevinkiyosepyo/Lightning-Data-Pipeline-API.git
 cd Lightning-Data-Pipeline-API
 docker-compose up -d
 
-# Verify ingestion
 docker-compose logs -f ingestion
 
-# Query recent strikes
 curl http://localhost:8000/strikes/recent?limit=5
 ```
 
