@@ -53,14 +53,14 @@ curl http://localhost:8000/strikes/recent?limit=5
 
 ## Core Features
 
-### 1. Binary Protocol Decoder
+### 1. Real-time Data Ingestion
 Reverse-engineered Blitzortung's compression scheme by analyzing patterns in raw WebSocket data:
 - Multi-byte Unicode sequence mapping (C4 88 → '0', C4 89 → '1', etc.)
 - 2-byte to 1-byte digit compression
 - JSON structure reconstruction
-- Longitude decimal point correction for coordinate accuracy
+- PostgreSQL with PostGIS-ready schema
 
-### 2. Production-Grade Infrastructure
+### 2. Infrastructure
 - **Resilient Connections:** Exponential backoff reconnection strategy
 - **Data Validation:** Coordinate bounds checking and schema enforcement  
 - **Observability:** Real-time metrics tracking (throughput, success rates, latency)
