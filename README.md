@@ -54,13 +54,20 @@ This pipeline provides a queryable, real-time data source for these applications
 ## Quick Start
 
 ```bash
-git clone https://github.com/kevinkiyosepyo/Lightning-Data-Pipeline-API.git
-cd Lightning-Data-Pipeline-API
-docker-compose up -d
+Prerequisites:
+Have Docker running in the background
 
-docker-compose logs -f ingestion
+1. Clone the repo:
+```git clone https://github.com/kevinkiyosepyo/lightning-data-pipeline.git```
+```cd lightning-data-pipeline```
 
-curl http://localhost:8000/strikes/recent?limit=5
+2. Start the services:
+   docker-compose up -d
+
+3. Verify the ingestion is working:
+   ```docker-compose logs -f ingestion```
+   
+You should see lightning strikes being processed now
 ```
 
 **Requirements:** Docker, Docker Compose
