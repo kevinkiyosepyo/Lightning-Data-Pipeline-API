@@ -10,7 +10,6 @@ Real-time lightning strike data pipeline that reverse-engineers Blitzortung's co
 
 Lightning strike data has real-world applications in:
 - **Aviation Safety** - Flight path planning and storm avoidance
-- **Weather Research** - Real-time storm tracking and prediction models
 - **Infrastructure Protection** - Early warning systems for power grids and telecommunications
 - **IoT Sensor Networks** - Distributed environmental monitoring systems
 
@@ -155,7 +154,7 @@ This is acceptable for real-time processing where volume compensates for individ
 
 ---
 
-## Database Schema
+**## Database Schema
 
 ```sql
 CREATE TABLE lightning_strikes (
@@ -175,7 +174,7 @@ CREATE INDEX idx_strike_timestamp ON lightning_strikes(strike_timestamp DESC);
 CREATE INDEX idx_location ON lightning_strikes(latitude, longitude);
 CREATE INDEX idx_inserted_at ON lightning_strikes(inserted_at DESC);
 ```
-
+**
 ---
 
 ## Production Considerations
@@ -202,38 +201,6 @@ If deploying this for enterprise use, I would add:
 - Rate limiting per client (Redis-based)
 - TLS/SSL for all connections
 - Secrets management (AWS Secrets Manager / HashiCorp Vault)
-
----
-
-## Example Queries
-
-**Find strikes near San Diego (50km radius):**
-```sql
-SELECT id, strike_timestamp, latitude, longitude,
-  SQRT(
-    POW(111.32 * (latitude - 32.7157), 2) + 
-    POW(111.32 * (longitude - (-117.1611)) * COS(RADIANS(latitude)), 2)
-  ) AS distance_km
-FROM lightning_strikes
-WHERE strike_timestamp > NOW() - INTERVAL '1 hour'
-  AND latitude BETWEEN 32.2 AND 33.2
-  AND longitude BETWEEN -117.7 AND -116.6
-ORDER BY distance_km
-LIMIT 10;
-```
-
-**Hourly strike distribution:**
-```sql
-SELECT 
-  DATE_TRUNC('hour', strike_timestamp) as hour,
-  COUNT(*) as total_strikes,
-  COUNT(*) FILTER (WHERE polarity = 'positive') as positive_strikes,
-  AVG(mds) as avg_detection_score
-FROM lightning_strikes
-WHERE strike_timestamp > NOW() - INTERVAL '24 hours'
-GROUP BY hour
-ORDER BY hour DESC;
-```
 
 ---
 
