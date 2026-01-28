@@ -58,14 +58,14 @@ Prerequisites:
 Have Docker running in the background
 
 1. Clone the repo:
-```git clone https://github.com/kevinkiyosepyo/lightning-data-pipeline-api.git```
-```cd lightning-data-pipeline```
+git clone https://github.com/kevinkiyosepyo/lightning-data-pipeline-api.git
+cd lightning-data-pipeline
 
 2. Start the services:
-   docker-compose up -d
+docker-compose up -d
 
 3. Verify the ingestion is working:
-   ```docker-compose logs -f ingestion```
+docker-compose logs -f ingestion
    
 You should see lightning strikes being processed now
 ```
