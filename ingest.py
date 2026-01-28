@@ -34,7 +34,7 @@ class LightningDatabase:
         for attempt in range(max_retries):
             try:
                 self.conn = psycopg2.connect(
-                    host=os.getenv('POSTGRES_HOST', 'localhost'),
+                    host=os.getenv('POSTGRES_HOST', 'postgres'),
                     database=os.getenv('POSTGRES_DB', 'lightning'),
                     user=os.getenv('POSTGRES_USER', 'lightning_user'),
                     password=os.getenv('POSTGRES_PASSWORD', 'lightning_pass'),
