@@ -18,14 +18,34 @@ This pipeline provides a queryable, real-time data source for these applications
 
 ---
 
-## Architecture
-
+# Architecture:
 ```
-Blitzortung WebSocket (Binary) 
-    ↓ Custom Decoder (80% success rate)
-PostgreSQL + Spatial Indexes
-    ↓ FastAPI REST Endpoints
-Application Layer (Aviation, Research, Alerts)
+┌─────────────────┐
+│  Blitzortung    │
+│  WebSocket API  │
+└────────┬────────┘
+         │ Binary Data Stream
+         ▼
+┌─────────────────┐
+│   Ingestion     │
+│   Service       │
+│  - Decoder      │
+│  - Validator    │
+└────────┬────────┘
+         │ Structured Data
+         ▼
+┌─────────────────┐
+│  PostgreSQL     │
+│   Database      │
+│  - Strikes      │
+│  - Statistics   │
+└────────┬────────┘
+         │ SQL Queries
+         ▼
+┌─────────────────┐
+│   FastAPI       │
+│   REST API      │
+└─────────────────┘
 ```
 
 **Stack:** Python 3.11 | FastAPI | PostgreSQL 15 | Docker Compose
