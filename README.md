@@ -58,7 +58,7 @@ Prerequisites:
 Have Docker running in the background
 
 1. Clone the repo:
-```git clone https://github.com/kevinkiyosepyo/lightning-data-pipeline.git```
+```git clone https://github.com/kevinkiyosepyo/lightning-data-pipeline-api.git```
 ```cd lightning-data-pipeline```
 
 2. Start the services:
