@@ -379,15 +379,16 @@ def main():
             db = LightningDatabase()
             decoder = BlitzortungDecoder(db)
             
-            result = ws.run_forever(ping_interval=30, ping_timeout=10)
-            logger.warning(f"run_forever returned: {result} (reconnecting in 5s)")
+            websocket.enableTrace(True)
+            ws = websocket.WebSocketApp(
                 "wss://ws7.blitzortung.org/",
                 on_open=on_open,
                 on_data=on_data,
                 on_error=on_error,
                 on_close=on_close
             )
-            ws.run_forever()
+            result = ws.run_forever(ping_interval=30, ping_timeout=10)
+            logger.warning(f"run_forever returned: {result} (reconnecting in 5s)")
             
         except KeyboardInterrupt:
             logger.info("Shutting down...")
@@ -398,8 +399,4 @@ def main():
             logger.info("Reconnecting in 5 seconds...")
             if db:
                 db.close()
-            time.sleep(5)
-
-            if __name__ == "__main__":
-                main()
 
