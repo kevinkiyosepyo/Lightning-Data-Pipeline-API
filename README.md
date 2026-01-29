@@ -158,29 +158,31 @@ This is acceptable for real-time processing where volume compensates for individ
 
 ---
 
-**## Database Schema
+# 📊 Database Schema
 
-```sql
-CREATE TABLE lightning_strikes (
-    id BIGSERIAL PRIMARY KEY,
-    strike_time BIGINT NOT NULL,
-    strike_timestamp TIMESTAMP NOT NULL,
-    latitude DOUBLE PRECISION NOT NULL CHECK (latitude BETWEEN -90 AND 90),
-    longitude DOUBLE PRECISION NOT NULL CHECK (longitude BETWEEN -180 AND 180),
-    altitude INTEGER,
-    polarity VARCHAR(50),
-    mds INTEGER,  -- Multi-sensor detection score
-    mcg INTEGER,  -- Multi-sensor cloud-to-ground confidence
-    inserted_at TIMESTAMP DEFAULT NOW()
-);
 
-CREATE INDEX idx_strike_timestamp ON lightning_strikes(strike_timestamp DESC);
-CREATE INDEX idx_location ON lightning_strikes(latitude, longitude);
-CREATE INDEX idx_inserted_at ON lightning_strikes(inserted_at DESC);
-```
-**
+| Column | Type | Description |
+|--------|------|-------------|
+| id | BIGSERIAL | Primary key |
+| strike_time | BIGINT | Unix timestamp (microseconds) |
+| strike_timestamp | TIMESTAMP | Human-readable timestamp |
+| latitude | DOUBLE PRECISION | Latitude (-90 to 90) |
+| longitude | DOUBLE PRECISION | Longitude (-180 to 180) |
+| altitude | INTEGER | Altitude in meters (nullable) |
+| polarity | VARCHAR(50) | Strike polarity (nullable) |
+| mds | INTEGER | Multi-sensor detection score (nullable) |
+| mcg | INTEGER | Multi-sensor cloud-to-ground (nullable) |
+| inserted_at | TIMESTAMP | Record insertion time |
+
+**Indexes:**
+- `idx_strike_timestamp` - Optimized for time-based queries
+- `idx_location` - Optimized for spatial queries
+- `idx_inserted_at` - Optimized for recent data retrieval
+
+### `ingestion_stats` Table
+
+Tracks real-time ingestion performance metrics.
 ---
-
 ## Production Considerations
 
 If deploying this for enterprise use, I would add:
