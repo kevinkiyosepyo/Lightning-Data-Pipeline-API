@@ -378,7 +378,6 @@ def main():
             # Recreate database connection on each loop iteration
             db = LightningDatabase()
             decoder = BlitzortungDecoder(db)
-            
             websocket.enableTrace(True)
             ws = websocket.WebSocketApp(
                 "wss://ws7.blitzortung.org/",
@@ -387,6 +386,7 @@ def main():
                 on_error=on_error,
                 on_close=on_close
             )
+
             result = ws.run_forever(ping_interval=30, ping_timeout=10)
             logger.warning(f"run_forever returned: {result} (reconnecting in 5s)")
             
