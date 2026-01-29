@@ -59,7 +59,7 @@ Have Docker running in the background
 
 1. Clone the repo:
 git clone https://github.com/kevinkiyosepyo/lightning-data-pipeline-api.git
-cd lightning-data-pipeline
+cd lightning-data-pipeline-api
 
 2. Start the services:
 docker-compose up -d
