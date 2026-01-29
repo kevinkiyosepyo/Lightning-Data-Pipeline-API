@@ -359,18 +359,13 @@ def on_data(ws, data, opcode, fin):
         decoder.print_stats()
 
 def on_open(ws):
-    """Handle WebSocket connection open."""
-    logger.info("Connected to Blitzortung WebSocket")
-    ws.send('{"a":111}')
+    logger.info("WebSocket opened")
 
-def on_error(ws, e):
-    """Handle WebSocket errors."""
-    logger.error(f"WebSocket error: {e}")
+def on_error(ws, error):
+    logger.exception(f"WebSocket error: {error}")
 
-def on_close(ws, *args):
-    """Handle WebSocket connection close."""
-    logger.info("WebSocket connection closed")
-    decoder.print_stats()
+def on_close(ws, close_status_code, close_msg):
+    logger.warning(f"WebSocket closed: code={close_status_code} msg={close_msg}")
 
 def main():
     """Main ingestion loop."""
