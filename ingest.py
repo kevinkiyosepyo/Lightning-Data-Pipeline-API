@@ -379,8 +379,8 @@ def main():
             db = LightningDatabase()
             decoder = BlitzortungDecoder(db)
             
-            websocket.enableTrace(True)
-            ws = websocket.WebSocketApp(
+            result = ws.run_forever(ping_interval=30, ping_timeout=10)
+            logger.warning(f"run_forever returned: {result} (reconnecting in 5s)")
                 "wss://ws7.blitzortung.org/",
                 on_open=on_open,
                 on_data=on_data,
