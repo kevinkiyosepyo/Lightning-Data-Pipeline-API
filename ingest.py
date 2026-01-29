@@ -329,8 +329,8 @@ class BlitzortungDecoder:
 
 
 # WebSocket event handlers
-db = LightningDatabase()
-decoder = BlitzortungDecoder(db)
+db = None
+decoder = None
 
 def on_data(ws, data, opcode, fin):
     """Handle incoming WebSocket data."""
