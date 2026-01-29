@@ -23,12 +23,14 @@ services:
       context: .
       dockerfile: Dockerfile.ingestion
     container_name: lightning_ingestion
+    command: python -u ingest.py  # Add -u flag for unbuffered output
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_DB: lightning
       POSTGRES_USER: lightning_user
       POSTGRES_PASSWORD: lightning_pass
       POSTGRES_PORT: 5432
+      PYTHONUNBUFFERED: 1  # Add this
     depends_on:
       postgres:
         condition: service_healthy
