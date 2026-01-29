@@ -179,9 +179,6 @@ This is acceptable for real-time processing where volume compensates for individ
 - `idx_location` - Optimized for spatial queries
 - `idx_inserted_at` - Optimized for recent data retrieval
 
-### `ingestion_stats` Table
-
-Tracks real-time ingestion performance metrics.
 ---
 ## Production Considerations
 
