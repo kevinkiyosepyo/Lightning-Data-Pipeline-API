@@ -9,7 +9,6 @@ Real-time lightning strike data pipeline that reverse-engineers Blitzortung's co
 ## Why This Exists
 
 Lightning strike data has real-world applications in:
-- **Aviation Safety** - Flight path planning and storm avoidance
 - **Infrastructure Protection** - Early warning systems for power grids and telecommunications
 - **IoT Sensor Networks** - Distributed environmental monitoring systems
 
