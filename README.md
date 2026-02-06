@@ -77,10 +77,9 @@ docker-compose up -d --build
 
 # 3. Verify the ingestion is working:
 docker-compose logs -f ingestion
-   
+```
 You should see lightning strikes being processed now
 Optional: to query the API, search "http://localhost:8000/strikes" in your browser. 
-```
 ---
 
 ## Core Features
