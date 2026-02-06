@@ -1,18 +1,32 @@
-# Lightning Data Pipeline & API
+# ⚡ Lightning Data Pipeline & API
 
-Real-time lightning strike data pipeline that reverse-engineers Blitzortung's compressed binary WebSocket protocol to process 200-500 strikes per minute with sub-100ms latency.
+A real-time lightning strike data pipeline that reverse-engineers Blitzortung’s undocumented compressed binary WebSocket feed, decodes it into structured data. 
+
+- Processes 200–500+ strikes per minute
+
+- End-to-end latency: sub-100ms
+
+- Live source: https://map.blitzortung.org
 
 **The Challenge:** Blitzortung's WebSocket feed uses an undocumented compressed binary format. By analyzing hex patterns and building a custom substitution mapping system, I achieved 80% decode accuracy for multi-byte Unicode sequences and compressed JSON structures.
 
 ---
 
-## Why This Exists
+## 🚧 The Core Challenge
 
-Lightning strike data has real-world applications in:
-- **Infrastructure Protection** - Early warning systems for power grids and telecommunications
-- **IoT Sensor Networks** - Distributed environmental monitoring systems
+Blitzortung does not provide a public API or documented data format.
 
-This pipeline provides a queryable, real-time data source for these applications.
+Instead, lightning strikes are broadcast over a compressed binary WebSocket protocol containing:
+
+- Non-UTF8 multi-byte Unicode sequences
+- Compressed numeric fields
+- Obfuscated JSON-like structures
+
+What I did: 
+
+- Built a custom substitution-based decoder to reconstruct JSON fields
+- Normalized timestamps, coordinates, and polarity data
+- Persisted decoded strikes into PostgreSQL in real time
 
 ---
 
