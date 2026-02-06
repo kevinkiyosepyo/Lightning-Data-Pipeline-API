@@ -233,14 +233,22 @@ class BlitzortungDecoder:
             
             timestamp_raw = int(time_match.group(1))
             
+
             # Convert to datetime
-            if timestamp_raw > 1e15:
-                timestamp = datetime.datetime.fromtimestamp(timestamp_raw / 1000000)
-            elif timestamp_raw > 1e12:
-                timestamp = datetime.datetime.fromtimestamp(timestamp_raw / 1000)
-            else:
+            if timestamp_raw > 1e17:          # nanoseconds
+                timestamp = datetime.datetime.fromtimestamp(timestamp_raw / 1_000_000_000)
+            elif timestamp_raw > 1e14:        # microseconds
+            timestamp = datetime.datetime.fromtimestamp(timestamp_raw / 1_000_000)
+            elif timestamp_raw > 1e11:        # milliseconds
+                timestamp = datetime.datetime.fromtimestamp(timestamp_raw / 1_000)
+            else:                             # seconds
                 timestamp = datetime.datetime.fromtimestamp(timestamp_raw)
-            
+
+
+
+
+
+
             # Extract coordinates
             lat_match = re.search(r'lat[:\s]*([0-9.-]+)', text)
             lon_match = re.search(r'lon[:\s]*([0-9.-]+)', text)
