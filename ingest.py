@@ -238,7 +238,7 @@ class BlitzortungDecoder:
             if timestamp_raw > 1e17:          # nanoseconds
                 timestamp = datetime.datetime.fromtimestamp(timestamp_raw / 1_000_000_000)
             elif timestamp_raw > 1e14:        # microseconds
-            timestamp = datetime.datetime.fromtimestamp(timestamp_raw / 1_000_000)
+                timestamp = datetime.datetime.fromtimestamp(timestamp_raw / 1_000_000)
             elif timestamp_raw > 1e11:        # milliseconds
                 timestamp = datetime.datetime.fromtimestamp(timestamp_raw / 1_000)
             else:                             # seconds
