@@ -222,6 +222,26 @@ class BlitzortungDecoder:
             logger.error(f"Decode error: {e}")
             self.failed_decodes += 1
             return None
+
+    def normalize_epoch(ts: int) -> tuple[int, datetime.datetime]:
+        # Bring ts down until it's in a plausible "epoch" scale
+        # Target: seconds ~ 1e9, ms ~ 1e12, us ~ 1e15, ns ~ 1e18
+        while ts > 10**18:   # too big even for ns
+            ts //= 10
+        while ts > 10**15:   # bigger than microseconds
+            ts //= 10
+    
+        # Now decide unit by digits
+        if ts > 10**14:      # microseconds
+            dt = datetime.datetime.fromtimestamp(ts / 1_000_000)
+        elif ts > 10**11:    # milliseconds
+            dt = datetime.datetime.fromtimestamp(ts / 1_000)
+        else:                # seconds
+            dt = datetime.datetime.fromtimestamp(ts)
+    
+        return ts, dt
+
+
     
     def _extract_fields(self, text: str) -> Optional[Dict]:
         """Extract fields from decoded text."""
@@ -232,7 +252,7 @@ class BlitzortungDecoder:
                 return None
             
             timestamp_raw = int(time_match.group(1))
-            
+            timestamp_raw, timestamp = normalize_epoch(timestamp_raw)
 
             # Convert to datetime
             if timestamp_raw > 1e17:          # nanoseconds
