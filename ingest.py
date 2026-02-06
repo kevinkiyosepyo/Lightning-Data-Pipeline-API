@@ -17,6 +17,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def normalize_epoch(ts: int) -> datetime.datetime:
+    # Decide unit by magnitude
+    if ts > 10**17:        # nanoseconds
+        return datetime.datetime.fromtimestamp(ts / 1_000_000_000)
+    elif ts > 10**14:      # microseconds
+        return datetime.datetime.fromtimestamp(ts / 1_000_000)
+    elif ts > 10**11:      # milliseconds
+        return datetime.datetime.fromtimestamp(ts / 1_000)
+    else:                  # seconds
+        return datetime.datetime.fromtimestamp(ts)
 
 class LightningDatabase:
     """Handles all database operations for lightning strikes."""
@@ -250,24 +260,9 @@ class BlitzortungDecoder:
             time_match = re.search(r'time[":]+(\d+)', text)
             if not time_match:
                 return None
-            
+                        
             timestamp_raw = int(time_match.group(1))
-            timestamp_raw, timestamp = normalize_epoch(timestamp_raw)
-
-            # Convert to datetime
-            if timestamp_raw > 1e17:          # nanoseconds
-                timestamp = datetime.datetime.fromtimestamp(timestamp_raw / 1_000_000_000)
-            elif timestamp_raw > 1e14:        # microseconds
-                timestamp = datetime.datetime.fromtimestamp(timestamp_raw / 1_000_000)
-            elif timestamp_raw > 1e11:        # milliseconds
-                timestamp = datetime.datetime.fromtimestamp(timestamp_raw / 1_000)
-            else:                             # seconds
-                timestamp = datetime.datetime.fromtimestamp(timestamp_raw)
-
-
-
-
-
+            timestamp = normalize_epoch(timestamp_raw)
 
             # Extract coordinates
             lat_match = re.search(r'lat[:\s]*([0-9.-]+)', text)
@@ -303,7 +298,7 @@ class BlitzortungDecoder:
                 'mcg': mcg
             }
         except Exception as e:
-            logger.debug(f"Field extraction error: {e}")
+            logger.debug(f"_extract_fields failed: {e}")
             return None
     
     def _fix_longitude(self, lon_str: str) -> float:
