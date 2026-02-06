@@ -8,8 +8,6 @@ A real-time lightning strike data pipeline that reverse-engineers Blitzortung’
 
 - Live source: https://map.blitzortung.org
 
-**The Challenge:** Blitzortung's WebSocket feed uses an undocumented compressed binary format. By analyzing hex patterns and building a custom substitution mapping system, I achieved 80% decode accuracy for multi-byte Unicode sequences and compressed JSON structures.
-
 ---
 
 ## 🚧 The Core Challenge
