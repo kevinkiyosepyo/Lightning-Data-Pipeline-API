@@ -360,6 +360,10 @@ def on_data(ws, data, opcode, fin):
 
 def on_open(ws):
     logger.info("WebSocket opened")
+    # Subscribe to live lightning strike feed
+    subscribe_msg = json.dumps({"a": 111})
+    ws.send(subscribe_msg)
+    logger.info("Subscribed to lightning feed")
 
 def on_error(ws, error):
     logger.exception(f"WebSocket error: {error}")
@@ -399,3 +403,6 @@ def main():
             logger.info("Reconnecting in 5 seconds...")
             if db:
                 db.close()
+
+if __name__ == "__main__":
+    main()
