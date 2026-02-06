@@ -1,4 +1,4 @@
-# ⚡ Lightning Data Pipeline & API
+# Lightning Data Pipeline & API
 
 A real-time lightning strike data pipeline that reverse-engineers Blitzortung’s undocumented compressed binary WebSocket feed, decodes it into structured data. 
 
@@ -10,7 +10,7 @@ A real-time lightning strike data pipeline that reverse-engineers Blitzortung’
 
 ---
 
-## 🚧 The Core Challenge
+## The Core Challenge
 
 Blitzortung does not provide a public API or documented data format.
 
@@ -167,7 +167,7 @@ This is acceptable for real-time processing where volume compensates for individ
 
 ---
 
-# 📊 Database Schema
+# Database Schema
 
 
 | Column | Type | Description |
