@@ -256,4 +256,4 @@ lightning-data-pipeline/
 
 Kevin Kiyo  
 [kevinkpyo@gmail.com](mailto:kevinkpyo@gmail.com)  
-[LinkedIn](https://linkedin.com/in/your-profile) | [GitHub](https://github.com/kevinkiyosepyo)
+[LinkedIn](https://www.linkedin.com/in/kevin-pyo/) | [GitHub](https://github.com/kevinkiyosepyo)
