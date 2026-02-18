@@ -158,7 +158,7 @@ Decoded:  0     1     2     3     4
 Result:   {"time":1699564800123456,"lat":34.0522,...}
 ```
 
-### Why 80% Success Rate?
+### Why 99% Success Rate?
 The remaining 1-2% failures come from:
 - Incomplete/corrupted WebSocket frames (network issues)
 - Unknown character mappings for rare edge cases
