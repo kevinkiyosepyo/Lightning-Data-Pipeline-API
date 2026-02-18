@@ -134,7 +134,7 @@ Service health status and database connectivity verification.
 | Metric | Value | Context |
 |--------|-------|---------|
 | **Throughput** | 200-500 strikes/min | During active global storms |
-| **Decode Success** | ~80% | Typical for undocumented compressed protocols |
+| **Decode Success** | ~99% | Typical for undocumented compressed protocols |
 | **Insert Latency** | <100ms | WebSocket → Database |
 | **Reconnection Time** | <5s | Automatic failover with backoff |
 
@@ -159,7 +159,7 @@ Result:   {"time":1699564800123456,"lat":34.0522,...}
 ```
 
 ### Why 80% Success Rate?
-The remaining 20% failures come from:
+The remaining 1-2% failures come from:
 - Incomplete/corrupted WebSocket frames (network issues)
 - Unknown character mappings for rare edge cases
 - Protocol changes from Blitzortung (evolving format)
