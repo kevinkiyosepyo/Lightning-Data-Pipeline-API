@@ -82,6 +82,12 @@ docker-compose logs -f ingestion
 #Optional: to query the API, search "http://localhost:8000/strikes" in your browser. 
 ```
 
+### Running the tests
+```bash
+pip install -r requirements-dev.txt
+pytest tests/
+```
+
 ---
 
 ## Core Features
@@ -109,17 +115,35 @@ Reverse-engineered Blitzortung's compression scheme by analyzing patterns in raw
 
 ## API Endpoints
 
+### Strikes (filtered)
+```bash
+GET /strikes?limit=100&since=2026-07-01T00:00:00&min_lat=30&max_lat=50
+```
+Lightning strikes with optional time-range and bounding-box filters, plus pagination.
+
 ### Recent Strikes
 ```bash
-GET /strikes/recent?limit=100
+GET /strikes/recent?minutes=60&limit=100
 ```
-Returns the most recent lightning strikes with full metadata (coordinates, polarity, multi-sensor scores).
+The most recent lightning strikes with full metadata (coordinates, polarity, multi-sensor scores).
 
-### System Statistics  
+### Nearby Strikes
 ```bash
-GET /stats
+GET /strikes/nearby?lat=34.05&lon=-118.24&radius=50&minutes=60
 ```
-Real-time ingestion metrics: total processed, success rate, throughput, last strike timestamp.
+Strikes within a radius (km) of a point, sorted by Haversine distance.
+
+### Strike Statistics
+```bash
+GET /strikes/stats
+```
+Aggregate strike counts and time ranges, with optional `since`/`until` filters.
+
+### Ingestion Statistics
+```bash
+GET /ingestion/stats
+```
+Real-time ingestion metrics: total processed, success rate, last strike timestamp.
 
 ### Health Check
 ```bash
@@ -138,7 +162,7 @@ Service health status and database connectivity verification.
 | **Insert Latency** | <100ms | WebSocket → Database |
 | **Reconnection Time** | <5s | Automatic failover with backoff |
 
-**Current Bottlenecks:** Single-threaded decoder, synchronous database writes. At 10x scale (2,000+ strikes/min), would implement async batch inserts and parallel decoders.
+**Batched writes:** Strikes are buffered and flushed with `execute_values` (default: every 50 strikes or 2 seconds, tunable via `BATCH_SIZE` / `BATCH_INTERVAL_SECONDS`), turning ~2 commits per strike into 2 commits per batch. At 10x scale (2,000+ strikes/min), next steps would be parallel decoders and async I/O.
 
 ---
 
@@ -233,11 +257,16 @@ lightning-data-pipeline/
 
 ## Future Enhancements
 
+**Done:**
+- ~~Geographic Filtering API~~ - `/strikes/nearby?lat=X&lon=Y&radius=50` endpoint
+- ~~Unit tests for the decoder~~ - `pytest tests/` (21 tests, including regression tests for real feed corruption)
+- ~~Batched inserts~~ - `execute_values` with configurable flush thresholds
+
 **If I had another week:**
-1. **Geographic Filtering API** - `/strikes/near?lat=X&lon=Y&radius=50km` endpoint (30 min implementation)
-2. **Pytest Test Suite** - Unit tests for decoder, integration tests for API endpoints
-3. **TimescaleDB Migration** - Hypertables for 10x time-series query performance
-4. **Grafana Dashboard** - Real-time visualization of ingestion rate, success rate, geographic distribution
+1. **API integration tests** - pytest + httpx against a test database
+2. **TimescaleDB Migration** - Hypertables for 10x time-series query performance
+3. **Grafana Dashboard** - Real-time visualization of ingestion rate, success rate, geographic distribution
+4. **Live map frontend** - A small Leaflet page polling `/strikes/recent`
 
 **For production deployment:**
 5. **CI/CD Pipeline** - GitHub Actions for automated testing and deployment
