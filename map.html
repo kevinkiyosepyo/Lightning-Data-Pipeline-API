@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Lightning — Blitzortung feed</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root {
+    --surface: #14181d;
+    --panel: rgba(20, 24, 29, 0.88);
+    --ink: #e8eaed;
+    --ink-muted: #9aa3ad;
+    --accent: #ffd166;
+    --border: rgba(255, 255, 255, 0.08);
+  }
+  html, body { margin: 0; height: 100%; background: var(--surface); }
+  #map { height: 100%; background: var(--surface); }
+  .panel {
+    position: absolute; z-index: 1000;
+    background: var(--panel); color: var(--ink);
+    border: 1px solid var(--border); border-radius: 10px;
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    backdrop-filter: blur(6px);
+  }
+  #title {
+    top: 12px; left: 12px; padding: 10px 14px;
+  }
+  #title h1 { margin: 0; font-size: 15px; font-weight: 600; }
+  #title p { margin: 2px 0 0; color: var(--ink-muted); font-size: 12px; }
+  #title .dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent); margin-right: 6px; vertical-align: baseline;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { opacity: 0.35; } }
+  #stats {
+    top: 12px; right: 12px; padding: 10px 14px;
+    display: grid; grid-template-columns: auto auto; gap: 2px 18px; text-align: right;
+  }
+  #stats .k { color: var(--ink-muted); text-align: left; }
+  #stats .v { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .leaflet-container .leaflet-control-attribution {
+    background: var(--panel); color: var(--ink-muted);
+  }
+  .leaflet-container .leaflet-control-attribution a { color: var(--ink-muted); }
+  .leaflet-tooltip.strike-tip {
+    background: var(--panel); color: var(--ink);
+    border: 1px solid var(--border); border-radius: 6px;
+    font: 12px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .leaflet-tooltip.strike-tip::before { display: none; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="title" class="panel">
+  <h1><span class="dot"></span>Live Lightning</h1>
+  <p>Blitzortung feed &rarr; LZW decode &rarr; Kafka &rarr; PostGIS</p>
+</div>
+<div id="stats" class="panel">
+  <span class="k">live rate</span><span class="v" id="s-rate">&ndash;</span>
+  <span class="k">last hour</span><span class="v" id="s-hour">&ndash;</span>
+  <span class="k">total stored</span><span class="v" id="s-total">&ndash;</span>
+  <span class="k">last strike</span><span class="v" id="s-last">&ndash;</span>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+  const API = "";  // same origin as the API service
+  const ACCENT = "#ffd166";
+  const FLASH = "#fff3c4";
+  const FADE_MINUTES = 30;      // dot lifetime on the map
+  const POLL_MS = 3000;
+
+  const map = L.map("map", {
+    center: [25, -20], zoom: 3, minZoom: 2, worldCopyJump: true,
+    preferCanvas: true, zoomControl: false,
+  });
+  L.control.zoom({ position: "bottomright" }).addTo(map);
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png", {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/attributions">CARTO</a> · data: <a href="https://www.blitzortung.org">Blitzortung.org</a>',
+    subdomains: "abcd", maxZoom: 12,
+  }).addTo(map);
+
+  const renderer = L.canvas({ padding: 0.4 });
+  const seen = new Set();      // strike ids already plotted
+  const live = [];             // { marker, bornMs, strikeMs }
+  let arrivals = [];           // arrival timestamps for the live-rate stat
+
+  function ageFraction(strikeMs) {
+    return Math.min(1, (Date.now() - strikeMs) / (FADE_MINUTES * 60 * 1000));
+  }
+
+  // Dots must stay visible at world zoom and not blob together when zoomed in.
+  function baseRadius() {
+    const z = map.getZoom();
+    return z <= 3 ? 4 : z <= 5 ? 3.5 : 3;
+  }
+
+  map.on("zoomend", () => {
+    const r = baseRadius();
+    live.forEach((d) => d.marker.setRadius(r));
+  });
+
+  function addStrike(s, isNew) {
+    if (seen.has(s.id)) return;
+    seen.add(s.id);
+    const strikeMs = Date.parse(s.strike_timestamp);
+    const marker = L.circleMarker([s.latitude, s.longitude], {
+      renderer, radius: isNew ? baseRadius() + 4 : baseRadius(), stroke: false,
+      fillColor: isNew ? FLASH : ACCENT,
+      fillOpacity: Math.max(0.12, 1 - ageFraction(strikeMs) * 0.88),
+      interactive: true,
+    }).addTo(map);
+    marker.bindTooltip(
+      `${new Date(strikeMs).toUTCString().slice(17, 25)} UTC<br>` +
+      `${s.latitude.toFixed(3)}, ${s.longitude.toFixed(3)}<br>` +
+      `${s.station_count ?? "?"} stations`,
+      { className: "strike-tip", direction: "top", offset: [0, -6], sticky: true }
+    );
+    live.push({ marker, bornMs: Date.now(), strikeMs });
+    if (isNew) arrivals.push(Date.now());
+  }
+
+  // Fade dots by strike age; shrink the arrival flash; drop expired dots.
+  setInterval(() => {
+    const now = Date.now();
+    for (let i = live.length - 1; i >= 0; i--) {
+      const d = live[i];
+      const frac = ageFraction(d.strikeMs);
+      if (frac >= 1) {
+        map.removeLayer(d.marker);
+        live.splice(i, 1);
+        continue;
+      }
+      const flashing = now - d.bornMs < 1500;
+      d.marker.setStyle({
+        fillColor: flashing ? FLASH : ACCENT,
+        fillOpacity: Math.max(0.12, 1 - frac * 0.88),
+      });
+      const r = baseRadius();
+      if (!flashing && d.marker.options.radius !== r) d.marker.setRadius(r);
+    }
+  }, 1000);
+
+  async function getJSON(path) {
+    const res = await fetch(API + path);
+    if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
+    return res.json();
+  }
+
+  async function backfill() {
+    try {
+      const strikes = await getJSON(`/strikes/recent?minutes=${FADE_MINUTES}&limit=1000`);
+      strikes.forEach((s) => addStrike(s, false));
+    } catch (e) { console.error(e); }
+  }
+
+  async function poll() {
+    try {
+      const strikes = await getJSON("/strikes/recent?minutes=2&limit=500");
+      strikes.reverse().forEach((s) => addStrike(s, true));
+    } catch (e) { console.error(e); }
+  }
+
+  async function refreshStats() {
+    try {
+      const [stats, ingest] = await Promise.all([
+        getJSON("/strikes/stats"), getJSON("/ingestion/stats"),
+      ]);
+      const cutoff = Date.now() - 60_000;
+      arrivals = arrivals.filter((t) => t >= cutoff);
+      document.getElementById("s-rate").textContent = `${arrivals.length}/min`;
+      document.getElementById("s-hour").textContent = stats.strikes_last_hour.toLocaleString();
+      document.getElementById("s-total").textContent = stats.total_strikes.toLocaleString();
+      document.getElementById("s-last").textContent = ingest.last_strike_time
+        ? new Date(ingest.last_strike_time).toUTCString().slice(17, 25) + " UTC" : "–";
+    } catch (e) { console.error(e); }
+  }
+
+  backfill().then(() => { poll(); refreshStats(); });
+  setInterval(poll, POLL_MS);
+  setInterval(refreshStats, 5000);
+</script>
+</body>
+</html>

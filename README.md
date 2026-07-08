@@ -7,6 +7,11 @@ undocumented compressed WebSocket feed, streams decoded strikes through Kafka in
 and builds an analytics layer (hour-partitioned Parquet lake + DuckDB warehouse) orchestrated by Dagster
 with automated data-quality checks.
 
+![Live lightning strikes streaming onto the map](docs/demo.gif)
+
+*Live view at `localhost:8000/map` — every dot is a real strike, seconds old, flashing on arrival
+and fading over 30 minutes.*
+
 - Live source: https://map.blitzortung.org (200–500+ strikes/min during active storms)
 - Decode success: **100%** — the feed's compression scheme is LZW, and this repo implements the decoder
 - End-to-end latency: sub-second from WebSocket frame to queryable row
@@ -85,6 +90,9 @@ docker compose up -d --build
 # Watch strikes flow in
 docker compose logs -f ingestion consumer
 
+# Watch strikes live on the world map
+open http://localhost:8000/map
+
 # Query the API (interactive docs at http://localhost:8000/docs)
 curl 'http://localhost:8000/strikes/recent?minutes=10&limit=5'
 
@@ -128,6 +136,7 @@ antimeridian, no bounding-box approximation.
 
 | Endpoint | Description |
 |----------|-------------|
+| `GET /map` | Live world map of incoming strikes |
 | `GET /strikes` | Filterable by time range and bounding box, paginated |
 | `GET /strikes/recent?minutes=60` | Most recent strikes |
 | `GET /strikes/nearby?lat=&lon=&radius=` | Radius search (km), sorted by distance |

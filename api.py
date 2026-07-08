@@ -7,9 +7,11 @@ ingestion metrics out of PostgreSQL via a shared connection pool.
 import os
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
 from pydantic import BaseModel
@@ -126,6 +128,12 @@ def root():
             "/health": "Health check",
         },
     }
+
+
+@app.get("/map", include_in_schema=False)
+def live_map():
+    """Live world map of incoming strikes (Leaflet, polls /strikes/recent)."""
+    return FileResponse(Path(__file__).parent / "map.html", media_type="text/html")
 
 
 @app.get("/health")
