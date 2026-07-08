@@ -1,259 +1,220 @@
 # Lightning Data Pipeline & API
 
-A real-time lightning strike data pipeline that reverse-engineers Blitzortung’s undocumented compressed binary WebSocket feed, decodes it into structured data. 
+[![CI](https://github.com/kevinkiyosepyo/Lightning-Data-Pipeline-API/actions/workflows/ci.yml/badge.svg)](https://github.com/kevinkiyosepyo/Lightning-Data-Pipeline-API/actions/workflows/ci.yml)
 
-- Processes 200–500+ strikes per minute
+A real-time data platform for global lightning strikes. It reverse-engineers Blitzortung's
+undocumented compressed WebSocket feed, streams decoded strikes through Kafka into PostgreSQL/PostGIS,
+and builds an analytics layer (hour-partitioned Parquet lake + DuckDB warehouse) orchestrated by Dagster
+with automated data-quality checks.
 
-- End-to-end latency: sub-100ms
-
-- Live source: https://map.blitzortung.org
+- Live source: https://map.blitzortung.org (200–500+ strikes/min during active storms)
+- Decode success: **100%** — the feed's compression scheme is LZW, and this repo implements the decoder
+- End-to-end latency: sub-second from WebSocket frame to queryable row
 
 ---
 
 ## The Core Challenge
 
-Blitzortung does not provide a public API or documented data format.
+Blitzortung provides no public API. Strikes arrive over a WebSocket as strings of seemingly
+garbled Unicode (`Ĉĉ ĊċČ…`). I initially reverse-engineered a 200-entry character substitution
+table by comparing raw frames against expected JSON — which worked ~99% of the time.
 
-Instead, lightning strikes are broadcast over a compressed binary WebSocket protocol containing:
+The breakthrough was recognizing *why* a substitution table almost works: the feed is
+**LZW-compressed**, with each compressed code transmitted as one Unicode code point. A static
+table is just a snapshot of the LZW dictionary for a "typical" message; it breaks whenever a
+message builds different dictionary entries. Implementing the real LZW decoder
+([`lzw.py`](lzw.py), ~30 lines) reconstructs the correct dictionary *per message* and yields
+byte-exact JSON every time — including fields the substitution approach could never recover,
+like the full list of detector stations that triangulated each strike.
 
-- Non-UTF8 multi-byte Unicode sequences
-- Compressed numeric fields
-- Obfuscated JSON-like structures
-
-What I did: 
-
-- Built a custom substitution-based decoder to reconstruct JSON fields
-- Normalized timestamps, coordinates, and polarity data
-- Persisted decoded strikes into PostgreSQL in real time
+```
+Wire:    ą´ĂďĂŊ×ÐÜ...                     (one Unicode char = one LZW code)
+Decoded: {"time":1783502092045360000,"lat":22.578867,"lon":-97.768136,
+          "alt":0,"pol":0,"mds":11666,"mcg":154,"status":0,"region":3,
+          "sig":[{"sta":2157,...}, ...]}   (exact original JSON)
+```
 
 ---
 
-# Architecture:
+## Architecture
+
 ```
-┌─────────────────┐
-│  Blitzortung    │
-│  WebSocket API  │
-└────────┬────────┘
-         │ Binary Data Stream
+┌──────────────────┐
+│   Blitzortung    │
+│  WebSocket feed  │
+└────────┬─────────┘
+         │ LZW-compressed frames
          ▼
-┌─────────────────┐
-│   Ingestion     │
-│   Service       │
-│  - Decoder      │
-│  - Validator    │
-└────────┬────────┘
-         │ Structured Data
+┌──────────────────┐   bad frames   ┌──────────────────────┐
+│ Ingestion service├───────────────►│ lightning.strikes.dlq │  (dead-letter queue)
+│  LZW decode +    │                └──────────────────────┘
+│  validation      │
+└────────┬─────────┘
+         │ lightning.strikes (Kafka)
          ▼
-┌─────────────────┐
-│  PostgreSQL     │
-│   Database      │
-│  - Strikes      │
-│  - Statistics   │
-└────────┬────────┘
-         │ SQL Queries
+┌──────────────────┐
+│ Storage consumer │  batched multi-row inserts, offsets committed
+│                  │  after DB commit, idempotent via natural key
+└────────┬─────────┘
          ▼
-┌─────────────────┐
-│   FastAPI       │
-│   REST API      │
-└─────────────────┘
+┌──────────────────┐      ┌─────────────────────────────────────────┐
+│ PostgreSQL 15    │◄─────┤ Dagster (hourly schedule + asset checks)│
+│  + PostGIS       │      │  • hourly_strike_aggregates (Postgres)  │
+└────────┬─────────┘      │  • strikes_parquet (partitioned lake)   │
+         │                │  • duckdb_analytics (warehouse)         │
+         ▼                └─────────────────────────────────────────┘
+┌──────────────────┐
+│  FastAPI REST    │  spatial queries via ST_DWithin + GiST index
+└──────────────────┘
 ```
 
-**Stack:** Python 3.11 | FastAPI | PostgreSQL 15 | Docker Compose
+**Stack:** Python 3.11 · Kafka · PostgreSQL 15 + PostGIS · FastAPI · Dagster · DuckDB · Parquet · Docker Compose
 
 ---
 
 ## Quick Start
 
 ```bash
-Prerequisite:
-Have Docker running in the background
+# Prerequisite: Docker running
 
-# 1. Clone the repo in terminal:
-git clone https://github.com/kevinkiyosepyo/lightning-data-pipeline-api.git
-cd lightning-data-pipeline-api
+git clone https://github.com/kevinkiyosepyo/Lightning-Data-Pipeline-API.git
+cd Lightning-Data-Pipeline-API
 
-# 2. Start the services:
-docker-compose up -d --build
+docker compose up -d --build
 
-# 3. Verify the ingestion is working:
-docker-compose logs -f ingestion
+# Watch strikes flow in
+docker compose logs -f ingestion consumer
 
-#You should see lightning strikes being processed now
-#Optional: to query the API, search "http://localhost:8000/strikes" in your browser. 
+# Query the API (interactive docs at http://localhost:8000/docs)
+curl 'http://localhost:8000/strikes/recent?minutes=10&limit=5'
+
+# Dagster UI (assets, quality checks, schedule)
+open http://localhost:3000
 ```
 
----
+Run the test suite:
 
-## Core Features
-
-### 1. Real-time Data Ingestion
-Reverse-engineered Blitzortung's compression scheme by analyzing patterns in raw WebSocket data:
-- Multi-byte Unicode sequence mapping (C4 88 → '0', C4 89 → '1', etc.)
-- 2-byte to 1-byte digit compression
-- JSON structure reconstruction
-- PostgreSQL with PostGIS-ready schema
-
-### 2. Infrastructure
-- **Resilient Connections:** Exponential backoff reconnection strategy
-- **Data Validation:** Coordinate bounds checking and schema enforcement  
-- **Observability:** Real-time metrics tracking (throughput, success rates, latency)
-- **Containerization:** Full Docker Compose stack with health checks
-
-### 3. Spatial-Optimized Database
-- Composite B-tree indexes on (latitude, longitude) for geographic queries
-- Time-series indexes for temporal filtering
-- Constraint validation ensuring data integrity
-- Ready for PostGIS extension if geospatial queries expand
-
----
-
-## API Endpoints
-
-### Recent Strikes
 ```bash
-GET /strikes/recent?limit=100
+pip install -r requirements/ingest.txt -r requirements/dev.txt
+pytest
 ```
-Returns the most recent lightning strikes with full metadata (coordinates, polarity, multi-sensor scores).
-
-### System Statistics  
-```bash
-GET /stats
-```
-Real-time ingestion metrics: total processed, success rate, throughput, last strike timestamp.
-
-### Health Check
-```bash
-GET /health
-```
-Service health status and database connectivity verification.
 
 ---
 
-## Performance Profile
+## Components
 
-| Metric | Value | Context |
-|--------|-------|---------|
-| **Throughput** | 200-500 strikes/min | During active global storms |
-| **Decode Success** | ~99% | Typical for undocumented compressed protocols |
-| **Insert Latency** | <100ms | WebSocket → Database |
-| **Reconnection Time** | <5s | Automatic failover with backoff |
+### 1. LZW decoder (`lzw.py`)
+The heart of the project. Blitzortung LZW-compresses each strike's JSON and sends the code
+stream as text. The decoder rebuilds the compression dictionary incrementally per message —
+no dictionary is ever transmitted — including the classic `cScSc` self-referential edge case.
+Tested against real captured frames (`tests/fixtures/frames.json`), not synthetic data.
 
-**Current Bottlenecks:** Single-threaded decoder, synchronous database writes. At 10x scale (2,000+ strikes/min), would implement async batch inserts and parallel decoders.
+### 2. Ingestion service (`ingest.py`)
+WebSocket client → LZW decode → validation → Kafka producer. Failed frames are published to a
+**dead-letter topic** with the error attached as a message header instead of being dropped, so
+protocol changes are observable and replayable. Reconnects with exponential backoff, rotating
+across Blitzortung's server pool.
+
+### 3. Storage consumer (`consumer.py`)
+Kafka consumer → PostgreSQL with **batched multi-row inserts** (up to 200 strikes per statement,
+1s max latency). Delivery semantics: offsets are committed only after the database transaction
+commits (at-least-once), and a natural-key unique constraint with `ON CONFLICT DO NOTHING`
+makes writes idempotent — so redeliveries never create duplicates.
+
+### 4. REST API (`api.py`)
+FastAPI over a connection pool. `/strikes/nearby` uses PostGIS `ST_DWithin` on a `GEOGRAPHY`
+column with a GiST index — exact spherical distance, correct at the poles and across the
+antimeridian, no bounding-box approximation.
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /strikes` | Filterable by time range and bounding box, paginated |
+| `GET /strikes/recent?minutes=60` | Most recent strikes |
+| `GET /strikes/nearby?lat=&lon=&radius=` | Radius search (km), sorted by distance |
+| `GET /strikes/stats` | Aggregate statistics |
+| `GET /ingestion/stats` | Pipeline throughput and success rate |
+| `GET /health` | Service + database health |
+
+### 5. Orchestration & analytics (`orchestration/`)
+Dagster runs an hourly schedule materializing three assets:
+
+- **`hourly_strike_aggregates`** — per-region hourly rollups upserted into Postgres;
+  recomputes a trailing window so late data is folded in and reruns are idempotent
+- **`strikes_parquet`** — hour-partitioned Parquet lake (`date=YYYY-MM-DD/hour=HH/`),
+  rewritten per partition so backfills are safe
+- **`duckdb_analytics`** — DuckDB warehouse over the lake: daily summaries, region activity,
+  and storm-cell detection (spatial-bin clustering)
+
+Plus **data-quality checks** surfaced in the Dagster UI: feed freshness (< 15 min lag),
+coordinate bounds, and duplicate detection.
+
+---
+
+## Data Model
+
+Core table (`lightning_strikes`):
+
+| Column | Type | Notes |
+|--------|------|-------|
+| strike_time | BIGINT | Nanosecond epoch from the feed |
+| strike_timestamp | TIMESTAMPTZ | Normalized UTC |
+| latitude / longitude | DOUBLE PRECISION | CHECK-constrained to valid ranges |
+| geom | GEOGRAPHY(POINT, 4326) | GiST-indexed for spatial queries |
+| altitude, polarity, mds, mcg | INTEGER | Signal metadata |
+| status, region | INTEGER | Feed metadata (unlocked by the LZW decoder) |
+| station_count | INTEGER | Detectors that triangulated the strike |
+
+Uniqueness: `(strike_time, latitude, longitude)` — the idempotency key for Kafka redeliveries.
 
 ---
 
-## Technical Deep Dive
+## Design Decisions
 
-### Decoder Implementation
-The WebSocket returns compressed binary data. I built a character substitution map by:
-1. Capturing raw hex output and comparing to expected JSON structure
-2. Identifying repeating patterns (e.g., C4 88-C4 91 for digits 0-9)
-3. Building a 200+ character mapping table for Unicode sequences
-4. Handling edge cases (longitude decimals, null values, special characters)
+- **Kafka between ingestion and storage** decouples the fragile part (third-party WebSocket)
+  from the durable part. Ingestion stays up during database maintenance; the consumer replays
+  from the topic. Adding a second consumer (e.g. real-time alerting) requires no changes to
+  ingestion.
+- **Batched writes over per-row commits** — the previous version committed twice per strike;
+  batching cut database round-trips by ~200x at peak rates.
+- **Exactly-once *effect* without exactly-once machinery** — at-least-once delivery plus
+  idempotent inserts is simpler and sufficient here.
+- **Parquet + DuckDB for analytics** keeps analytical scans off the operational database and
+  costs nothing to operate.
 
-**Example transformation:**
-```
-Raw hex:  C4 88 C4 89 C4 8A C4 8B C4 8C
-Decoded:  0     1     2     3     4
-Result:   {"time":1699564800123456,"lat":34.0522,...}
-```
-
-### Why 99% Success Rate?
-The remaining 1-2% failures come from:
-- Incomplete/corrupted WebSocket frames (network issues)
-- Unknown character mappings for rare edge cases
-- Protocol changes from Blitzortung (evolving format)
-
-This is acceptable for real-time processing where volume compensates for individual losses. For critical applications, implementing a validation layer against Blitzortung's map UI would increase accuracy.
-
----
-
-# Database Schema
-
-
-| Column | Type | Description |
-|--------|------|-------------|
-| id | BIGSERIAL | Primary key |
-| strike_time | BIGINT | Unix timestamp (microseconds) |
-| strike_timestamp | TIMESTAMP | Human-readable timestamp |
-| latitude | DOUBLE PRECISION | Latitude (-90 to 90) |
-| longitude | DOUBLE PRECISION | Longitude (-180 to 180) |
-| altitude | INTEGER | Altitude in meters (nullable) |
-| polarity | VARCHAR(50) | Strike polarity (nullable) |
-| mds | INTEGER | Multi-sensor detection score (nullable) |
-| mcg | INTEGER | Multi-sensor cloud-to-ground (nullable) |
-| inserted_at | TIMESTAMP | Record insertion time |
-
-**Indexes:**
-- `idx_strike_timestamp` - Optimized for time-based queries
-- `idx_location` - Optimized for spatial queries
-- `idx_inserted_at` - Optimized for recent data retrieval
-
----
-## Production Considerations
-
-If deploying this for enterprise use, I would add:
-
-**Scalability**
-- Horizontal scaling with message queue (Kafka/RabbitMQ) between ingestion and storage
-- Read replicas for query load distribution
-- Connection pooling with pgBouncer
-
-**Observability**  
-- Structured logging (JSON format) with correlation IDs
-- Prometheus metrics export for Grafana dashboards
-- Distributed tracing for request flow analysis
-
-**Data Quality**
-- Dead letter queue for failed decodes with manual review pipeline
-- Data validation service comparing against Blitzortung's map UI
-- Automated alerting for decode success rate drops below threshold
-
-**Security**
-- API authentication (JWT tokens)
-- Rate limiting per client (Redis-based)
-- TLS/SSL for all connections
-- Secrets management (AWS Secrets Manager / HashiCorp Vault)
+**Known limits:** single Kafka broker and single consumer (fine at 500 strikes/min; partition the
+topic by region to scale out), Dagster uses local storage rather than a database-backed instance,
+and the DLQ has no automated replay job yet.
 
 ---
 
 ## Project Structure
 
 ```
-lightning-data-pipeline/
-├── docker-compose.yml       # Orchestration for ingestion, API, and database
-├── Dockerfile.ingestion     # Container for WebSocket client + decoder
-├── Dockerfile.api           # Container for FastAPI REST service
-├── ingest.py               # WebSocket client with binary decoder
-├── api.py                  # FastAPI endpoints and database queries
-└── README.md               # This file
+├── lzw.py                    # LZW decoder (the reverse-engineering payoff)
+├── ingest.py                 # WebSocket → decode → Kafka producer (+ DLQ)
+├── consumer.py               # Kafka → batched PostGIS inserts
+├── api.py                    # FastAPI read layer
+├── orchestration/
+│   ├── assets.py             # Dagster assets + data-quality checks
+│   └── definitions.py        # Job, hourly schedule, definitions
+├── tests/
+│   ├── fixtures/frames.json  # Real frames captured from the live feed
+│   ├── test_lzw.py           # Decoder: round-trips, edge cases, real frames
+│   └── test_ingest.py        # Frame → record transformation, DLQ routing
+├── requirements/             # Per-service pinned dependencies
+├── docker-compose.yml        # postgres+postgis, kafka, ingestion, consumer, api, dagster
+└── .github/workflows/ci.yml  # ruff + pytest + compose build
 ```
-
----
-
-## Future Enhancements
-
-**If I had another week:**
-1. **Geographic Filtering API** - `/strikes/near?lat=X&lon=Y&radius=50km` endpoint (30 min implementation)
-2. **Pytest Test Suite** - Unit tests for decoder, integration tests for API endpoints
-3. **TimescaleDB Migration** - Hypertables for 10x time-series query performance
-4. **Grafana Dashboard** - Real-time visualization of ingestion rate, success rate, geographic distribution
-
-**For production deployment:**
-5. **CI/CD Pipeline** - GitHub Actions for automated testing and deployment
-6. **Cloud Infrastructure** - Terraform scripts for AWS deployment (RDS, ECS, ALB)
-7. **Monitoring Stack** - Prometheus + Grafana + Alertmanager for SLA tracking
 
 ---
 
 ## Acknowledgments
 
-**Blitzortung.org** - Global lightning detection network providing the WebSocket data feed
-
----
+**Blitzortung.org** — a volunteer-operated global lightning detection network. This project is
+for educational purposes; if you use their data, respect their
+[terms](https://www.blitzortung.org/en/contact.php).
 
 ## Contact
 
-Kevin Kiyo  
-[kevinkpyo@gmail.com](mailto:kevinkpyo@gmail.com)  
-[LinkedIn](https://www.linkedin.com/in/kevin-pyo/) | [GitHub](https://github.com/kevinkiyosepyo)
+Kevin Kiyo · [kevinkpyo@gmail.com](mailto:kevinkpyo@gmail.com) ·
+[LinkedIn](https://www.linkedin.com/in/kevin-pyo/) · [GitHub](https://github.com/kevinkiyosepyo)

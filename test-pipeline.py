@@ -3,9 +3,10 @@ Test script for Lightning Data Pipeline
 Run this to verify your pipeline is working correctly
 """
 
-import requests
-import time
 import sys
+import time
+
+import requests
 
 API_URL = "http://localhost:8000"
 
@@ -16,8 +17,8 @@ def test_health():
         response = requests.get(f"{API_URL}/health", timeout=5)
         if response.status_code == 200:
             data = response.json()
-            print(f"   ✓ API is healthy")
-            print(f"   ✓ Database connected")
+            print("   ✓ API is healthy")
+            print("   ✓ Database connected")
             print(f"   ✓ Total strikes in database: {data['total_strikes']}")
             return True
         else:
@@ -46,7 +47,7 @@ def test_ingestion_stats():
     except Exception as e:
         print(f"   ✗ Failed: {e}")
         return False
-    
+
 def test_recent_strikes():
     """Test getting recent strikes."""
     print("\n3. Testing recent strikes endpoint...")
@@ -57,7 +58,8 @@ def test_recent_strikes():
             print(f"   ✓ Found {len(strikes)} strikes in last 60 minutes")
             if strikes:
                 strike = strikes[0]
-                print(f"   ✓ Latest strike: {strike['latitude']:.4f}, {strike['longitude']:.4f} at {strike['strike_timestamp']}")
+                location = f"{strike['latitude']:.4f}, {strike['longitude']:.4f}"
+                print(f"   ✓ Latest strike: {location} at {strike['strike_timestamp']}")
             return True
         else:
             print(f"   ✗ API returned status {response.status_code}")
@@ -112,7 +114,7 @@ def wait_for_data():
     """Wait for some data to be ingested."""
     print("\n⏳ Waiting for data to be ingested...")
     print("   (This may take 1-2 minutes if the service just started)")
-    
+
     for i in range(30):
         try:
             response = requests.get(f"{API_URL}/ingestion/stats", timeout=5)
@@ -121,12 +123,12 @@ def wait_for_data():
                 if data['total_stored'] > 10:
                     print(f"\n   ✓ {data['total_stored']} strikes ingested!")
                     return True
-        except:
+        except requests.RequestException:
             pass
-        
+
         print(f"   Waiting... ({i+1}/30)", end='\r')
         time.sleep(2)
-    
+
     print("\n   ⚠ Still waiting for data. Make sure ingestion service is running.")
     return False
 
@@ -134,23 +136,23 @@ def main():
     print("=" * 60)
     print("Lightning Data Pipeline - Test Suite")
     print("=" * 60)
-    
+
     # Test 1: Health check
     if not test_health():
         print("\n❌ Pipeline is not running. Start it with: docker-compose up -d")
         sys.exit(1)
-    
+
     # Test 2: Check ingestion stats
     if not test_ingestion_stats():
         # Wait for data to come in
         if not wait_for_data():
             print("\n⚠ No data ingested yet. Pipeline might still be connecting.")
-    
+
     # Test 3-5: API endpoints
     test_recent_strikes()
     test_nearby_strikes()
     test_stats()
-    
+
     print("\n" + "=" * 60)
     print("✅ Pipeline test complete!")
     print("=" * 60)
