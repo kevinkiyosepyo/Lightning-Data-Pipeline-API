@@ -1,0 +1,15 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements/orchestration.txt requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY orchestration/ orchestration/
+
+ENV DAGSTER_HOME=/dagster_home
+RUN mkdir -p /dagster_home && printf 'telemetry:\n  enabled: false\n' > /dagster_home/dagster.yaml
+
+EXPOSE 3000
+
+CMD ["dagster", "dev", "-m", "orchestration.definitions", "--host", "0.0.0.0", "--port", "3000"]
