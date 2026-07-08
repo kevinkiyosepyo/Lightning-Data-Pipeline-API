@@ -1,37 +1,73 @@
-version: '3.8'
-
 services:
   postgres:
-    image: postgres:15-alpine
+    image: postgis/postgis:15-3.4-alpine
     container_name: lightning_db
     environment:
-      POSTGRES_DB: lightning
-      POSTGRES_USER: lightning_user
-      POSTGRES_PASSWORD: lightning_pass
-    ports:
-      - "5432:5432"
+      POSTGRES_DB: ${POSTGRES_DB:-lightning}
+      POSTGRES_USER: ${POSTGRES_USER:-lightning_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lightning_pass}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U lightning_user -d lightning"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lightning_user} -d ${POSTGRES_DB:-lightning}"]
       interval: 10s
       timeout: 5s
       retries: 5
+
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: lightning_kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_RETENTION_HOURS: 48
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
 
   ingestion:
     build:
       context: .
       dockerfile: Dockerfile.ingestion
     container_name: lightning_ingestion
-    command: python -u ingest.py  # Add -u flag for unbuffered output
     environment:
-      POSTGRES_HOST: postgres
-      POSTGRES_DB: lightning
-      POSTGRES_USER: lightning_user
-      POSTGRES_PASSWORD: lightning_pass
-      POSTGRES_PORT: 5432
-      PYTHONUNBUFFERED: 1  # Add this
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      PYTHONUNBUFFERED: 1
     depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile.consumer
+    container_name: lightning_consumer
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-lightning}
+      POSTGRES_USER: ${POSTGRES_USER:-lightning_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lightning_pass}
+      POSTGRES_PORT: 5432
+      PYTHONUNBUFFERED: 1
+    depends_on:
+      kafka:
+        condition: service_healthy
       postgres:
         condition: service_healthy
     restart: unless-stopped
@@ -43,9 +79,9 @@ services:
     container_name: lightning_api
     environment:
       POSTGRES_HOST: postgres
-      POSTGRES_DB: lightning
-      POSTGRES_USER: lightning_user
-      POSTGRES_PASSWORD: lightning_pass
+      POSTGRES_DB: ${POSTGRES_DB:-lightning}
+      POSTGRES_USER: ${POSTGRES_USER:-lightning_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lightning_pass}
       POSTGRES_PORT: 5432
     ports:
       - "8000:8000"
@@ -54,5 +90,28 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  dagster:
+    build:
+      context: .
+      dockerfile: Dockerfile.dagster
+    container_name: lightning_dagster
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-lightning}
+      POSTGRES_USER: ${POSTGRES_USER:-lightning_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lightning_pass}
+      POSTGRES_PORT: 5432
+      DATA_DIR: /data
+    ports:
+      - "3000:3000"
+    volumes:
+      - lake_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   postgres_data:
+  kafka_data:
+  lake_data:

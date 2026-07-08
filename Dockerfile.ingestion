@@ -2,10 +2,9 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir \
-    websocket-client \
-    psycopg2-binary
+COPY requirements/ingest.txt requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY ingest.py .
+COPY lzw.py ingest.py ./
 
-CMD ["python", "ingest.py"]
+CMD ["python", "-u", "ingest.py"]
