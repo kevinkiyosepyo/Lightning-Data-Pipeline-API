@@ -84,6 +84,28 @@ pub async fn ensure_schema(client: &Client) -> Result<()> {
             ALTER TABLE lightning_strikes ADD COLUMN IF NOT EXISTS stations SMALLINT;
             ALTER TABLE lightning_strikes ADD COLUMN IF NOT EXISTS region SMALLINT;
             ALTER TABLE lightning_strikes ADD COLUMN IF NOT EXISTS delay_s REAL;
+            -- Full-capture fields: everything the feed sends, plus derived
+            -- geometry. stations alone is right-censored at 40 and weakly
+            -- predicts fix quality, so gap/distances carry the real signal.
+            ALTER TABLE lightning_strikes ADD COLUMN IF NOT EXISTS status SMALLINT;
+            ALTER TABLE lightning_strikes ADD COLUMN IF NOT EXISTS stations_censored BOOLEAN;
+            ALTER TABLE lightning_strikes ADD COLUMN IF NOT EXISTS azimuthal_gap_deg REAL;
+            ALTER TABLE lightning_strikes ADD COLUMN IF NOT EXISTS nearest_station_km REAL;
+            ALTER TABLE lightning_strikes ADD COLUMN IF NOT EXISTS farthest_station_km REAL;
+
+            -- Per-station detections (the sig[] array), normalized.
+            CREATE TABLE IF NOT EXISTS strike_stations (
+                strike_id BIGINT NOT NULL REFERENCES lightning_strikes(id) ON DELETE CASCADE,
+                station_id INTEGER NOT NULL,
+                station_time BIGINT,
+                latitude DOUBLE PRECISION,
+                longitude DOUBLE PRECISION,
+                altitude INTEGER,
+                status SMALLINT,
+                PRIMARY KEY (strike_id, station_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_ss_strike ON strike_stations(strike_id);
+            CREATE INDEX IF NOT EXISTS idx_ss_station ON strike_stations(station_id);
 
             CREATE TABLE IF NOT EXISTS ingestion_stats (
                 id SERIAL PRIMARY KEY,
@@ -103,20 +125,27 @@ pub async fn ensure_schema(client: &Client) -> Result<()> {
     Ok(())
 }
 
-const COLS: usize = 11;
+const COLS: usize = 16;
 
-/// Insert a batch of strikes in a single multi-row statement.
-/// Returns the number of rows written.
-pub async fn insert_batch(client: &Client, strikes: &[Strike]) -> Result<u64> {
+/// Insert a batch of strikes plus their per-station detections.
+///
+/// Both writes share one transaction: a strike and its station rows are
+/// committed together or not at all, so `strike_stations` can never contain
+/// orphans or miss rows for a stored strike. Returns rows written.
+pub async fn insert_batch(client: &mut Client, strikes: &[Strike]) -> Result<u64> {
     if strikes.is_empty() {
         return Ok(0);
     }
 
-    let mut sql = String::with_capacity(200 + strikes.len() * 40);
+    let tx = client.transaction().await.context("begin tx")?;
+
+    let mut sql = String::with_capacity(260 + strikes.len() * 60);
     sql.push_str(
         "INSERT INTO lightning_strikes \
          (strike_time, strike_timestamp, latitude, longitude, altitude, \
-          polarity, mds, mcg, stations, region, delay_s) VALUES ",
+          polarity, mds, mcg, stations, region, delay_s, status, \
+          stations_censored, azimuthal_gap_deg, nearest_station_km, \
+          farthest_station_km) VALUES ",
     );
     let mut params: Vec<&(dyn ToSql + Sync)> = Vec::with_capacity(strikes.len() * COLS);
     // Naive UTC timestamps to match the TIMESTAMP (without tz) column.
@@ -151,13 +180,97 @@ pub async fn insert_batch(client: &Client, strikes: &[Strike]) -> Result<u64> {
         params.push(&s.stations);
         params.push(&s.region);
         params.push(&s.delay_s);
+        params.push(&s.status);
+        params.push(&s.stations_censored);
+        params.push(&s.azimuthal_gap_deg);
+        params.push(&s.nearest_station_km);
+        params.push(&s.farthest_station_km);
     }
+    sql.push_str(" RETURNING id");
 
-    let n = client
-        .execute(sql.as_str(), &params)
+    let rows = tx
+        .query(sql.as_str(), &params)
         .await
         .context("batch insert")?;
-    Ok(n)
+    let ids: Vec<i64> = rows.iter().map(|r| r.get::<_, i64>("id")).collect();
+
+    insert_station_hits(&tx, &ids, strikes).await?;
+
+    tx.commit().await.context("commit tx")?;
+    Ok(ids.len() as u64)
+}
+
+const SCOLS: usize = 7;
+/// Postgres caps a statement at 65535 parameters; stay well under.
+const MAX_STATION_ROWS: usize = 2000;
+
+/// One `strike_stations` row, flattened and owned so the values outlive the
+/// borrows held in the query parameter vector.
+/// `(strike_id, station_id, station_time, lat, lon, alt, status)`
+type StationRow = (i64, i32, i64, f64, f64, Option<i32>, Option<i16>);
+
+/// Write the sig[] detections for each strike, chunked to respect the
+/// parameter limit (50 strikes x 40 stations = 2000 rows x 7 params).
+async fn insert_station_hits(
+    tx: &tokio_postgres::Transaction<'_>,
+    ids: &[i64],
+    strikes: &[Strike],
+) -> Result<()> {
+    let mut flat: Vec<StationRow> = Vec::new();
+    for (id, s) in ids.iter().zip(strikes) {
+        for h in &s.station_hits {
+            flat.push((
+                *id,
+                h.sta,
+                h.time,
+                h.lat,
+                h.lon,
+                h.alt.map(|v| v as i32),
+                h.status.map(|v| v as i16),
+            ));
+        }
+    }
+    if flat.is_empty() {
+        return Ok(());
+    }
+
+    for chunk in flat.chunks(MAX_STATION_ROWS) {
+        let mut sql = String::with_capacity(160 + chunk.len() * 30);
+        sql.push_str(
+            "INSERT INTO strike_stations \
+             (strike_id, station_id, station_time, latitude, longitude, altitude, status) VALUES ",
+        );
+        let mut params: Vec<&(dyn ToSql + Sync)> = Vec::with_capacity(chunk.len() * SCOLS);
+        for (i, row) in chunk.iter().enumerate() {
+            if i > 0 {
+                sql.push(',');
+            }
+            let base = i * SCOLS;
+            sql.push('(');
+            for j in 0..SCOLS {
+                if j > 0 {
+                    sql.push(',');
+                }
+                sql.push('$');
+                sql.push_str(&(base + j + 1).to_string());
+            }
+            sql.push(')');
+            params.push(&row.0);
+            params.push(&row.1);
+            params.push(&row.2);
+            params.push(&row.3);
+            params.push(&row.4);
+            params.push(&row.5);
+            params.push(&row.6);
+        }
+        // A station can legitimately appear twice for one strike in the feed;
+        // keep the first rather than aborting the batch.
+        sql.push_str(" ON CONFLICT (strike_id, station_id) DO NOTHING");
+        tx.execute(sql.as_str(), &params)
+            .await
+            .context("station hits insert")?;
+    }
+    Ok(())
 }
 
 /// Add to the running ingestion counters.

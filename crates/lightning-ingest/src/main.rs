@@ -36,6 +36,7 @@ struct Counters {
     received: u64,
     failed: u64,
     recovered: u64,
+    no_geometry: u64,
 }
 
 #[tokio::main]
@@ -130,6 +131,9 @@ async fn run_socket(
                     c.recovered += 1;
                     warn!(power, total = c.recovered, "epoch recovery fired");
                 }
+                if strike.azimuthal_gap_deg.is_none() {
+                    c.no_geometry += 1;
+                }
                 if tx.send(Ok(strike)).await.is_err() {
                     return Ok(());
                 }
@@ -151,8 +155,13 @@ async fn run_socket(
             } else {
                 String::new()
             };
+            let geo = if c.no_geometry > 0 {
+                format!(" | NoGeometry: {}", c.no_geometry)
+            } else {
+                String::new()
+            };
             info!(
-                "Processed: {} | Decoded: {} | Failed: {} | Success: {pct:.1}%{rec}",
+                "Processed: {} | Decoded: {} | Failed: {} | Success: {pct:.1}%{rec}{geo}",
                 c.received, ok, c.failed
             );
         }
@@ -161,7 +170,10 @@ async fn run_socket(
 }
 
 /// Drain the channel into Postgres in batches.
-async fn writer_task(client: tokio_postgres::Client, mut rx: mpsc::Receiver<Result<Strike, ()>>) {
+async fn writer_task(
+    mut client: tokio_postgres::Client,
+    mut rx: mpsc::Receiver<Result<Strike, ()>>,
+) {
     let mut batch: Vec<Strike> = Vec::with_capacity(BATCH_MAX);
     let mut failed_in_window: i32 = 0;
     let mut ticker = tokio::time::interval(Duration::from_millis(FLUSH_MS));
@@ -174,12 +186,12 @@ async fn writer_task(client: tokio_postgres::Client, mut rx: mpsc::Receiver<Resu
                     Some(Ok(s)) => {
                         batch.push(s);
                         if batch.len() >= BATCH_MAX {
-                            flush(&client, &mut batch, &mut failed_in_window).await;
+                            flush(&mut client, &mut batch, &mut failed_in_window).await;
                         }
                     }
                     Some(Err(())) => failed_in_window += 1,
                     None => {
-                        flush(&client, &mut batch, &mut failed_in_window).await;
+                        flush(&mut client, &mut batch, &mut failed_in_window).await;
                         info!("channel closed; writer exiting");
                         return;
                     }
@@ -187,14 +199,14 @@ async fn writer_task(client: tokio_postgres::Client, mut rx: mpsc::Receiver<Resu
             }
             _ = ticker.tick() => {
                 if !batch.is_empty() || failed_in_window > 0 {
-                    flush(&client, &mut batch, &mut failed_in_window).await;
+                    flush(&mut client, &mut batch, &mut failed_in_window).await;
                 }
             }
         }
     }
 }
 
-async fn flush(client: &tokio_postgres::Client, batch: &mut Vec<Strike>, failed: &mut i32) {
+async fn flush(client: &mut tokio_postgres::Client, batch: &mut Vec<Strike>, failed: &mut i32) {
     let n = batch.len() as i32;
     let stored = match db::insert_batch(client, batch).await {
         Ok(rows) => rows as i32,

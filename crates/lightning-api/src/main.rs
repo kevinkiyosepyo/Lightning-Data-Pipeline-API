@@ -65,6 +65,7 @@ async fn main() -> Result<()> {
         .route("/strikes/recent", get(routes::recent))
         .route("/strikes/nearby", get(routes::nearby))
         .route("/strikes/stats", get(routes::stats))
+        .route("/strikes/{id}/stations", get(routes::strike_stations))
         .route("/ingestion/stats", get(routes::ingestion_stats))
         .route("/live", get(routes::live))
         .layer(cors)

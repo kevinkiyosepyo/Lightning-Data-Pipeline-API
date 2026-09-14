@@ -16,7 +16,7 @@ use serde_json::json;
 use tokio_postgres::types::ToSql;
 use tracing::error;
 
-use crate::models::{parse_ts, Health, IngestionStats, StrikeOut, StrikeStats};
+use crate::models::{parse_ts, Health, IngestionStats, StationOut, StrikeOut, StrikeStats};
 use crate::AppState;
 
 pub struct ApiError(StatusCode, String);
@@ -286,4 +286,71 @@ pub async fn ingestion_stats(State(st): State<AppState>) -> Result<Json<Ingestio
 /// Dashboard, compiled into the binary so the image ships one artifact.
 pub async fn live() -> Html<&'static str> {
     Html(include_str!("../../../live.html"))
+}
+
+/// Per-station detections behind one strike — the raw multilateration inputs.
+pub async fn strike_stations(
+    State(st): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let c = st.pool.get().await?;
+    let strike = c
+        .query_opt(
+            "SELECT latitude, longitude, stations, stations_censored, \
+                    azimuthal_gap_deg, nearest_station_km, farthest_station_km \
+             FROM lightning_strikes WHERE id = $1",
+            &[&id],
+        )
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("strike {id} not found")))?;
+
+    let (slat, slon): (f64, f64) = (strike.get("latitude"), strike.get("longitude"));
+    let rows = c
+        .query(
+            "SELECT station_id, station_time, latitude, longitude, altitude, status \
+             FROM strike_stations WHERE strike_id = $1 ORDER BY station_time",
+            &[&id],
+        )
+        .await?;
+
+    let stations: Vec<StationOut> = rows
+        .iter()
+        .map(|r| {
+            let la: Option<f64> = r.get("latitude");
+            let lo: Option<f64> = r.get("longitude");
+            let (d, b) = match (la, lo) {
+                (Some(la), Some(lo)) => (
+                    Some((geo::haversine_km(slat, slon, la, lo) * 100.0).round() / 100.0),
+                    Some((geo::bearing_deg(slat, slon, la, lo) * 10.0).round() / 10.0),
+                ),
+                _ => (None, None),
+            };
+            StationOut {
+                station_id: r.get("station_id"),
+                station_time: r.get("station_time"),
+                latitude: la,
+                longitude: lo,
+                altitude: r.get("altitude"),
+                status: r.get("status"),
+                distance_km: d,
+                bearing_deg: b,
+            }
+        })
+        .collect();
+
+    let gap: Option<f32> = strike.get("azimuthal_gap_deg");
+    let n: Option<i16> = strike.get("stations");
+    Ok(Json(json!({
+        "strike_id": id,
+        "latitude": slat,
+        "longitude": slon,
+        "stations_reported": n,
+        "stations_stored": stations.len(),
+        "stations_censored": strike.get::<_, Option<bool>>("stations_censored"),
+        "azimuthal_gap_deg": gap,
+        "nearest_station_km": strike.get::<_, Option<f32>>("nearest_station_km"),
+        "farthest_station_km": strike.get::<_, Option<f32>>("farthest_station_km"),
+        "confidence": crate::models::public_confidence(gap, n),
+        "stations": stations,
+    })))
 }

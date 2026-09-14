@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html.standalone { --foreground:#e7e9ee; --muted-foreground:#8b919e; --accent:#f59e0b;
+                    --border:#262b35; --card:#151920; }
+  html.standalone body { background:#0e1116; margin:0; padding:18px;
+                         font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { font-family: inherit; color: var(--foreground); max-width: 660px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  .bar { display:flex; align-items:center; gap:8px; margin-bottom:12px; flex-wrap:wrap; }
+  button { font:inherit; font-size:12px; padding:5px 12px; border-radius:7px;
+           border:1px solid var(--border); background:var(--card); color:var(--foreground);
+           cursor:pointer; }
+  button:hover:not(:disabled) { border-color:var(--accent); }
+  button:disabled { opacity:.4; cursor:default; }
+  .counter { font-size:11px; color:var(--muted-foreground); font-variant-numeric:tabular-nums; }
+
+  .codes { display:flex; gap:5px; margin-bottom:14px; flex-wrap:wrap; }
+  .code { border:1px solid var(--border); border-radius:7px; padding:5px 9px;
+          font-family:ui-monospace,Menlo,monospace; font-size:12px; background:var(--card);
+          transition:all .25s ease; opacity:.35; }
+  .code.done { opacity:.55; }
+  .code.active { opacity:1; border-color:var(--accent);
+                 background:color-mix(in srgb, var(--accent) 18%, var(--card)); }
+
+  .panes { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:12px; }
+  .pane { border:1px solid var(--border); border-radius:9px; background:var(--card); padding:10px 12px; }
+  .k { font-size:10px; text-transform:uppercase; letter-spacing:.06em;
+       color:var(--muted-foreground); margin-bottom:6px; }
+  .out { font-family:ui-monospace,Menlo,monospace; font-size:17px; letter-spacing:1px; min-height:22px; }
+  .out .fresh { color:var(--accent); }
+  .dict div { font-family:ui-monospace,Menlo,monospace; font-size:11.5px; padding:1.5px 0; }
+  .dict .new { color:var(--accent); }
+  .dict .empty { color:var(--muted-foreground); font-family:inherit; font-size:11px; }
+
+  .note { border-left:2px solid var(--border); padding:7px 0 7px 11px; font-size:12px;
+          line-height:1.55; color:var(--muted-foreground); min-height:34px; }
+  .note b { color:var(--foreground); font-weight:600; }
+  .note.special { border-left-color:var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <button id="prev">‹ Back</button>
+    <button id="next">Step ›</button>
+    <button id="reset">Reset</button>
+    <span class="counter" id="counter"></span>
+  </div>
+
+  <div class="codes" id="codes"></div>
+
+  <div class="panes">
+    <div class="pane">
+      <div class="k">Output so far</div>
+      <div class="out" id="out">&nbsp;</div>
+    </div>
+    <div class="pane">
+      <div class="k">Dictionary (built live)</div>
+      <div class="dict" id="dict"></div>
+    </div>
+  </div>
+
+  <div class="note" id="note"></div>
+</div>
+
+<script>
+if (!getComputedStyle(document.documentElement).getPropertyValue('--foreground').trim())
+  document.documentElement.classList.add('standalone');
+
+// Decoding the codes for "abababab" → 97, 98, 256, 258, 98
+const STEPS = [
+  { label:"97", sub:"'a'", emit:"a", dict:null,
+    note:"Code <b>97</b> is below 256, so it's a literal: <b>'a'</b>. Nothing to add yet — the first code just seeds the process." },
+  { label:"98", sub:"'b'", emit:"b", dict:["256","ab"],
+    note:"Literal <b>'b'</b>. Now we add our first phrase: previous output <b>'a'</b> + first char of current <b>'b'</b> → <b>256 = \"ab\"</b>." },
+  { label:"256", sub:"→ dict", emit:"ab", dict:["257","ba"],
+    note:"Code <b>256</b> is ≥ 256, so look it up: <b>\"ab\"</b>. One code just produced two characters — that's the compression. Then add <b>257 = \"ba\"</b>." },
+  { label:"258", sub:"⚠ undefined", emit:"aba", dict:["258","aba"], special:true,
+    note:"<b>The tricky case.</b> Code 258 isn't in the dictionary yet — we've only defined 256 and 257. This happens when the encoder used a phrase the instant it created it. The rule: take the previous phrase <b>\"ab\"</b> + its own first char <b>'a'</b> → <b>\"aba\"</b>. Miss this and your decoder corrupts or crashes." },
+  { label:"98", sub:"'b'", emit:"b", dict:["259","abab"],
+    note:"Literal <b>'b'</b>, and add <b>259 = \"abab\"</b>. Done: 5 codes reconstructed 8 characters, and the dictionary was never sent — only rebuilt." }
+];
+
+let i = -1;
+
+function render() {
+  document.getElementById('codes').innerHTML = STEPS.map((s, n) =>
+    `<span class="code ${n === i ? 'active' : n < i ? 'done' : ''}">${s.label}<br>
+     <span style="font-size:9.5px;opacity:.7">${s.sub}</span></span>`).join('');
+
+  let out = '', dict = [];
+  for (let n = 0; n <= i; n++) {
+    out += n === i ? `<span class="fresh">${STEPS[n].emit}</span>` : STEPS[n].emit;
+    if (STEPS[n].dict) dict.push({ ...STEPS[n].dict, n });
+  }
+  document.getElementById('out').innerHTML = out || '&nbsp;';
+
+  const rows = [];
+  for (let n = 0; n <= i; n++) if (STEPS[n].dict)
+    rows.push(`<div class="${n === i ? 'new' : ''}">${STEPS[n].dict[0]} = "${STEPS[n].dict[1]}"</div>`);
+  document.getElementById('dict').innerHTML = rows.length ? rows.join('')
+    : '<div class="empty">0–255 = literal characters</div>';
+
+  const note = document.getElementById('note');
+  note.innerHTML = i < 0
+    ? 'Press <b>Step</b> to decode <span class="mono">97 · 98 · 256 · 258 · 98</span> back into the original string.'
+    : STEPS[i].note;
+  note.className = 'note' + (i >= 0 && STEPS[i].special ? ' special' : '');
+
+  document.getElementById('counter').textContent =
+    i < 0 ? 'ready' : `step ${i + 1} of ${STEPS.length}` + (i === STEPS.length - 1 ? ' — "abababab"' : '');
+  document.getElementById('prev').disabled = i < 0;
+  document.getElementById('next').disabled = i >= STEPS.length - 1;
+}
+
+document.getElementById('next').onclick  = () => { if (i < STEPS.length - 1) { i++; render(); } };
+document.getElementById('prev').onclick  = () => { if (i >= 0) { i--; render(); } };
+document.getElementById('reset').onclick = () => { i = -1; render(); };
+render();
+</script>
+</body>
+</html>

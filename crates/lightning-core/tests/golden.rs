@@ -79,3 +79,98 @@ fn garbage_frame_is_an_error_not_a_panic() {
     assert!(decode_frame("not json at all", now).is_err());
     assert!(decode_frame("", now).is_err());
 }
+
+/// Full-capture guarantee: every key the feed sends must be consumed by a
+/// modeled field. Anything unmodeled lands in `extra` and fails this test,
+/// so a protocol addition can never be silently dropped.
+#[test]
+fn no_feed_key_is_silently_dropped() {
+    use lightning_core::strike::RawStrike;
+    let fx = fixtures();
+    let mut unexpected: std::collections::BTreeSet<String> = Default::default();
+    for f in &fx {
+        let json = lightning_core::lzw::decode(&f.compressed);
+        let raw: RawStrike = serde_json::from_str(&json).expect("parses");
+        for k in raw.extra.keys() {
+            unexpected.insert(k.clone());
+        }
+    }
+    assert!(
+        unexpected.is_empty(),
+        "feed sent unmodeled keys (add them to RawStrike + schema): {unexpected:?}"
+    );
+}
+
+/// Station detail must survive decoding: every strike in the fixtures has a
+/// populated sig[] and derived geometry.
+#[test]
+fn station_detail_and_geometry_are_captured() {
+    let fx = fixtures();
+    let now = Utc
+        .timestamp_opt((fx[0].time / 1_000_000_000) as i64, 0)
+        .single()
+        .unwrap();
+
+    let mut censored = 0;
+    for (i, f) in fx.iter().enumerate() {
+        let (s, _) = decode_frame(&f.compressed, now).unwrap();
+        assert_eq!(
+            s.station_hits.len(),
+            f.stations,
+            "frame {i}: station hit count mismatch"
+        );
+        assert!(!s.station_hits.is_empty(), "frame {i}: no station hits");
+        assert!(
+            s.azimuthal_gap_deg.is_some(),
+            "frame {i}: geometry not computed"
+        );
+        let gap = s.azimuthal_gap_deg.unwrap();
+        assert!(
+            (0.0..=360.0).contains(&gap),
+            "frame {i}: gap {gap} out of range"
+        );
+        assert!(s.nearest_station_km.unwrap() <= s.farthest_station_km.unwrap());
+        assert!(s.confidence().unwrap() >= 0.0);
+        if s.stations_censored {
+            censored += 1;
+            assert_eq!(s.stations, Some(40), "censored flag must mean exactly 40");
+        }
+    }
+    // The live feed caps sig[] at 40; fixtures should show that censoring.
+    assert!(
+        censored > 0,
+        "expected some censored strikes in a real capture"
+    );
+}
+
+/// Confidence must be driven by geometry, not raw station count — the live
+/// audit showed 40-station strikes with 139° median gaps.
+#[test]
+fn confidence_penalizes_bad_geometry_despite_max_stations() {
+    use lightning_core::strike::{from_raw, RawStrike};
+    let now = Utc::now();
+
+    let make = |stations: Vec<(f64, f64)>| {
+        let sig: Vec<serde_json::Value> = stations
+            .iter()
+            .map(|(la, lo)| serde_json::json!({"sta":1,"time":1,"lat":la,"lon":lo}))
+            .collect();
+        let v = serde_json::json!({
+            "time": now.timestamp_nanos_opt().unwrap(),
+            "lat": 0.0, "lon": 0.0, "sig": sig
+        });
+        let raw: RawStrike = serde_json::from_value(v).unwrap();
+        from_raw(raw, now).unwrap().0
+    };
+
+    // Surrounded by 4 stations vs 8 stations all crammed to the north.
+    let good = make(vec![(10.0, 0.0), (0.0, 10.0), (-10.0, 0.0), (0.0, -10.0)]);
+    let bad = make((0..8).map(|i| (10.0, -4.0 + i as f64)).collect());
+
+    assert!(
+        good.confidence().unwrap() > bad.confidence().unwrap(),
+        "4 well-spread stations ({:?}) should beat 8 clustered ones ({:?})",
+        good.confidence(),
+        bad.confidence()
+    );
+}

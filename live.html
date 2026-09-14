@@ -20,7 +20,7 @@
   .pipe { font-size:11px; color:var(--muted-foreground); margin-bottom:12px; display:flex; gap:6px; flex-wrap:wrap; }
   .pipe b { color:var(--foreground); font-weight:500; }
 
-  .cards { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; margin-bottom:10px; }
+  .cards { display:grid; grid-template-columns:repeat(6,1fr); gap:8px; margin-bottom:10px; }
   .card { border:1px solid var(--border); border-radius:9px; padding:8px 10px; background:var(--card); }
   .k { font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted-foreground); }
   .v { font-size:18px; font-weight:600; margin-top:2px; font-variant-numeric:tabular-nums; }
@@ -72,7 +72,8 @@
       <canvas class="trend" id="spark"></canvas></div>
     <div class="card"><div class="k">Decode OK</div><div class="v" id="succ">—<small>%</small></div></div>
     <div class="card"><div class="k">Feed latency <small>p50</small></div><div class="v" id="lat">—<small>s</small></div></div>
-    <div class="card"><div class="k">Stations <small>median/strike</small></div><div class="v" id="stn">—</div></div>
+    <div class="card"><div class="k">Stations <small>median</small></div><div class="v" id="stn">—</div></div>
+    <div class="card"><div class="k">Azim. gap <small>p50</small></div><div class="v" id="gap">—<small>°</small></div></div>
   </div>
 
   <div class="maprow">
@@ -84,8 +85,8 @@
   </div>
 
   <table>
-    <thead><tr><th>UTC</th><th>Lat</th><th>Lon</th><th>Region</th><th>Stations</th><th>Conf</th></tr></thead>
-    <tbody id="rows"><tr><td colspan="6" class="sub">connecting…</td></tr></tbody>
+    <thead><tr><th>UTC</th><th>Lat</th><th>Lon</th><th>Region</th><th>Stations</th><th>Gap</th><th>Conf</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="7" class="sub">connecting…</td></tr></tbody>
   </table>
   <div class="foot" id="foot">—</div>
 </div>
@@ -207,6 +208,9 @@ async function tick() {
       const stns = rs.map(s => s.stations).filter(v => v != null).sort((a, b) => a - b);
       document.getElementById('stn').textContent =
         stns.length ? stns[Math.floor(stns.length / 2)] : '—';
+      const gaps = rs.map(s => s.azimuthal_gap_deg).filter(v => v != null).sort((a, b) => a - b);
+      document.getElementById('gap').textContent =
+        gaps.length ? Math.round(gaps[Math.floor(gaps.length / 2)]) : '—';
     }
 
     // region bars over the last 100
@@ -230,18 +234,21 @@ async function tick() {
     for (const s of rs.slice(0, 14)) {
       const tr = document.createElement('tr');
       if (!seen.has(s.id)) { tr.className = 'new'; seen.add(s.id); }
-      const conf = s.stations != null ? Math.min(100, s.stations / 50 * 100) : null;
+      const conf = s.confidence != null ? s.confidence : null;
+      const gapTxt = s.azimuthal_gap_deg != null ? Math.round(s.azimuthal_gap_deg) + '°' : '—';
+      const cens = s.stations_censored ? '<span title="capped at 40 by the feed" style="opacity:.6">+</span>' : '';
       tr.innerHTML = `<td class="mono">${s.strike_timestamp.slice(11, 19)}</td>
         <td class="mono">${s.latitude.toFixed(4)}</td>
         <td class="mono">${s.longitude.toFixed(4)}</td>
         <td>${region(s.latitude, s.longitude)}</td>
-        <td class="mono">${s.stations ?? '<span class="dim">—</span>'}</td>
-        <td>${conf != null ? `<span class="conf"><i style="width:${conf}%"></i></span>` : '<span class="dim">—</span>'}</td>`;
+        <td class="mono">${s.stations ?? '<span class="dim">—</span>'}${cens}</td>
+        <td class="mono dim">${gapTxt}</td>
+        <td>${conf != null ? `<span class="conf" title="${conf.toFixed(0)}/100 from station geometry"><i style="width:${conf}%"></i></span>` : '<span class="dim">—</span>'}</td>`;
       tb.appendChild(tr);
     }
     if (seen.size > 2000) seen = new Set(rs.map(s => s.id));
     document.getElementById('foot').textContent =
-      `updated ${new Date().toLocaleTimeString()} · ordered by ingestion time · conf = detecting stations / 50 · refreshes every 1s`;
+      `updated ${new Date().toLocaleTimeString()} · conf = station geometry (azimuthal gap), not raw count · + = count capped at 40 · 1s`;
   } catch (e) {
     document.getElementById('live').className = 'dot down';
     document.getElementById('foot').innerHTML =
