@@ -60,9 +60,9 @@
   <div class="hdr"><span class="dot" id="live"></span><h2>Lightning strike pipeline — live</h2></div>
   <div class="pipe">
     <span><b>Blitzortung</b> WebSocket</span><span>→</span>
-    <span><b>LZW</b> decode</span><span>→</span>
-    <span><b>Postgres</b></span><span>→</span>
-    <span><b>FastAPI</b></span><span>→</span>
+    <span><b>LZW</b> decode (Rust)</span><span>→</span>
+    <span><b>Postgres</b> batched</span><span>→</span>
+    <span><b>axum</b> API</span><span>→</span>
     <span>this page (1s poll)</span>
   </div>
 
@@ -93,7 +93,9 @@
 <script>
 if (!getComputedStyle(document.documentElement).getPropertyValue('--foreground').trim())
   document.documentElement.classList.add('standalone');
-const API = 'http://localhost:8000';
+// Same-origin when served from the API's /live route; falls back to
+// localhost:8000 when opened as a bare file (e.g. Hermes preview pane).
+const API = location.protocol.startsWith('http') ? location.origin : 'http://localhost:8000';
 const REFRESH_MS = 1000;
 const RATE_WINDOW_MS = 15000;
 let seen = new Set(), samples = [], rateHist = [], inFlight = false, mapStrikes = new Map();

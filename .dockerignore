@@ -2,3 +2,6 @@ target/
 backups/
 __pycache__/
 *.pyc
+.git/
+*.md
+!README.md
