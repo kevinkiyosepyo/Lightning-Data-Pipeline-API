@@ -1,272 +1,267 @@
 # Lightning Data Pipeline & API
 
-A real-time lightning strike data pipeline that reverse-engineers Blitzortung’s undocumented compressed binary WebSocket feed, decodes it into structured data. 
+A real-time lightning strike pipeline in **Rust**. It reverse-engineers
+Blitzortung's undocumented LZW-compressed WebSocket feed, decodes every frame
+to exact JSON, batches strikes into PostgreSQL, and serves them over a REST
+API with a live dashboard.
 
-- Processes 200–500+ strikes per minute
-
-- End-to-end latency: sub-100ms
-
-- Live source: https://map.blitzortung.org
+- 200–500+ strikes/min sustained, 100% decode success on the live feed
+- Two ~50 MB distroless containers, no runtime dependencies
+- Golden-tested against real captured frames; decoder output is byte-identical
+  to the reference implementation
 
 ---
 
 ## The Core Challenge
 
-Blitzortung does not provide a public API or documented data format.
+Blitzortung has no public API or documented data format. Strikes arrive over
+a WebSocket as compressed text where every character is a compression code.
 
-Instead, lightning strikes are broadcast over a compressed binary WebSocket protocol containing:
+Three iterations to get it right:
 
-- Non-UTF8 multi-byte Unicode sequences
-- Compressed numeric fields
-- Obfuscated JSON-like structures
+| | Approach | Result |
+|---|---|---|
+| **v1** (Python) | Fixed 200-entry byte-substitution table, reverse-engineered by hand from hex dumps | ~92% "success", but ~27% of survivors had **silently lost digits** — trailing zeros of the ns epoch — yielding strikes dated 1975 or 2537 |
+| **v2** (Python) | Identified the format as **LZW** with a positional phrase dictionary; implemented the real decompressor | 100% decode, exact 19-digit timestamps |
+| **v3** (Rust) | Full rewrite: same LZW algorithm, plus batched writes, backpressure, connection pooling, golden tests | Same correctness; **11× less ingest memory, 19× less API memory, 5× smaller images** (measured, below) |
 
-What I did: 
-
-- Identified the wire format as LZW compression (each frame character is a
-  compression code; codes ≥256 index a phrase dictionary built during decode)
-- Implemented the LZW decompressor from scratch — every frame now decodes to
-  exact JSON with full 19-digit nanosecond timestamps (100% decode rate)
-- Kept a plausibility guard (`normalize_epoch`) that clock-anchors any
-  damaged epoch and rejects strikes drifting >24h from wall time
-- Persisted decoded strikes into PostgreSQL in real time
+The v1 → v2 lesson: the substitution table *looked* right because it was
+approximately right — dictionary codes are positional, not fixed, so a table
+can only ever match a subset of frames. The failure mode was silent data
+corruption, not crashes. That is the kind of bug that only shows up when you
+actually look at the data's distribution (in this case: "why are 27% of
+timestamps in the wrong century?").
 
 ---
 
-# Architecture:
+## Architecture
+
 ```
-┌─────────────────┐
-│  Blitzortung    │
-│  WebSocket API  │
-└────────┬────────┘
-         │ Binary Data Stream
+┌──────────────────┐
+│   Blitzortung    │  wss://ws7.blitzortung.org  ({"a":111} subscribes)
+│   WebSocket      │
+└────────┬─────────┘
+         │ LZW-compressed frames
          ▼
-┌─────────────────┐
-│   Ingestion     │
-│   Service       │
-│  - Decoder      │
-│  - Validator    │
-└────────┬────────┘
-         │ Structured Data
-         ▼
-┌─────────────────┐
-│  PostgreSQL     │
-│   Database      │
-│  - Strikes      │
-│  - Statistics   │
-└────────┬────────┘
-         │ SQL Queries
-         ▼
-┌─────────────────┐
-│   FastAPI       │
-│   REST API      │
-└─────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  lightning-ingest  (Rust, tokio)                             │
+│                                                              │
+│   reader task            mpsc(2048)          writer task     │
+│   ├ LZW decode      ───────────────────►     ├ batch ≤50     │
+│   ├ serde_json                               ├ flush 250 ms  │
+│   ├ validate                                 └ 1 multi-row   │
+│   └ reconnect w/ backoff                        INSERT       │
+└────────────────────────────────┬─────────────────────────────┘
+                                 │
+                                 ▼
+                     ┌───────────────────────┐
+                     │  PostgreSQL 15        │
+                     │  lightning_strikes    │
+                     │  ingestion_stats      │
+                     └───────────┬───────────┘
+                                 │ deadpool (16 conns)
+                                 ▼
+┌──────────────────────────────────────────────────────────────┐
+│  lightning-api  (Rust, axum)                                 │
+│  /strikes  /strikes/recent  /strikes/nearby  /strikes/stats  │
+│  /ingestion/stats  /health  /live (embedded dashboard)       │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-**Stack:** Python 3.11 | FastAPI | PostgreSQL 15 | Docker Compose
+Decoding happens on the reader task so a slow database never stalls the
+socket; the bounded channel applies backpressure instead of unbounded growth.
+
+**Stack:** Rust 1.90 · tokio · tokio-tungstenite · axum 0.8 · tokio-postgres +
+deadpool · PostgreSQL 15 · Docker Compose · distroless runtime
 
 ---
 
 ## Quick Start
 
 ```bash
-Prerequisite:
-Have Docker running in the background
+# Prerequisite: Docker running
+git clone https://github.com/kevinkiyosepyo/Lightning-Data-Pipeline-API.git
+cd Lightning-Data-Pipeline-API
 
-# 1. Clone the repo in terminal:
-git clone https://github.com/kevinkiyosepyo/lightning-data-pipeline-api.git
-cd lightning-data-pipeline-api
+docker compose up -d --build      # first build ~5 min (release + LTO)
+docker compose logs -f ingestion  # watch strikes arrive
 
-# 2. Start the services:
-docker-compose up -d --build
+open http://localhost:8000/live   # live dashboard
+```
 
-# 3. Verify the ingestion is working:
-docker-compose logs -f ingestion
+Run the test suite (needs a local Rust toolchain):
 
-#You should see lightning strikes being processed now
-#Optional: to query the API, search "http://localhost:8000/strikes" in your browser. 
+```bash
+cargo test --workspace            # 15 unit + golden tests
+scripts/smoke.sh                  # 17 end-to-end checks against a running stack
 ```
 
 ---
 
-## Core Features
+## Workspace Layout
 
-### 1. Real-time Data Ingestion
-Reverse-engineered Blitzortung's wire protocol from raw WebSocket frames:
-- Identified the compression as LZW with an incrementally-built phrase dictionary
-- Implemented the decompressor from scratch (~20 lines, stdlib only)
-- Decoded frames parse as exact JSON — 19-digit ns timestamps, station
-  detection lists, polarity, deviation metrics
-- PostgreSQL with PostGIS-ready schema
-
-### 2. Infrastructure
-- **Resilient Connections:** Exponential backoff reconnection strategy
-- **Data Validation:** Coordinate bounds checking and schema enforcement  
-- **Observability:** Real-time metrics tracking (throughput, success rates, latency)
-- **Containerization:** Full Docker Compose stack with health checks
-
-### 3. Spatial-Optimized Database
-- Composite B-tree indexes on (latitude, longitude) for geographic queries
-- Time-series indexes for temporal filtering
-- Constraint validation ensuring data integrity
-- Ready for PostGIS extension if geospatial queries expand
+```
+crates/
+├── lightning-core/      Library shared by both services
+│   ├── src/lzw.rs         LZW decompressor (the protocol)
+│   ├── src/epoch.rs       ns-epoch plausibility guard
+│   ├── src/strike.rs      RawStrike → validated Strike
+│   ├── src/geo.rs         Haversine, bounding box
+│   └── tests/golden.rs    40 real frames; Rust output must equal reference
+├── lightning-ingest/    WebSocket → decode → batched Postgres
+│   ├── src/main.rs        reader/writer tasks, reconnect loop
+│   └── src/db.rs          schema, multi-row INSERT, stats
+└── lightning-api/       axum REST API
+    ├── src/main.rs        router, pool, CORS
+    ├── src/routes.rs      one handler per endpoint
+    └── src/models.rs      row → DTO, timestamp parsing
+Dockerfile               multi-stage, cargo-chef cached, two distroless targets
+docker-compose.yml       postgres + ingestion + api
+live.html                dashboard (embedded into the API binary at build time)
+scripts/smoke.sh         end-to-end verification
+reference/               v2 Python decoder + fixture capture script (the
+                         reference implementation the golden tests check against)
+```
 
 ---
 
 ## API Endpoints
 
-### Recent Strikes
-```bash
-GET /strikes/recent?limit=100
-```
-Returns the most recent lightning strikes with full metadata (coordinates, polarity, multi-sensor scores).
+Responses are identical in shape to the original Python API, so existing
+consumers work unchanged.
 
-### System Statistics  
-```bash
-GET /stats
-```
-Real-time ingestion metrics: total processed, success rate, throughput, last strike timestamp.
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Liveness + DB connectivity + total row count |
+| `GET /strikes/recent?minutes=60&limit=100` | Newest strikes, **ordered by ingestion time** (see below) |
+| `GET /strikes?since=&until=&min_lat=&max_lat=&min_lon=&max_lon=&limit=&offset=` | Filtered query |
+| `GET /strikes/nearby?lat=&lon=&radius=50&minutes=60&limit=100` | Radius search: bbox SQL prefilter → exact Haversine → sort by distance |
+| `GET /strikes/stats?since=&until=` | Count, time range, centroid |
+| `GET /ingestion/stats` | Received / stored / failed / success rate |
+| `GET /live` | Dashboard, served from the binary |
 
-### Health Check
-```bash
-GET /health
-```
-Service health status and database connectivity verification.
+Validation failures return **422** with `{"detail": "..."}`, never 500.
+
+**Why `/strikes/recent` orders by `inserted_at`:** the feed can in principle
+deliver a corrupt strike time. Ordering by that column lets a single
+far-future row pin the top of a live view forever. Ingestion time is
+monotonic and ours.
 
 ---
 
 ## Performance Profile
 
-| Metric | Value | Context |
-|--------|-------|---------|
-| **Throughput** | 200-500 strikes/min | During active global storms |
-| **Decode Success** | 100% | LZW decompressor, verified against live feed |
-| **Insert Latency** | <100ms | WebSocket → Database |
-| **Reconnection Time** | <5s | Automatic failover with backoff |
+Measured on the same host, same Postgres, same live feed, ~2 min warm:
 
-**Current Bottlenecks:** Single-threaded decoder, synchronous database writes. At 10x scale (2,000+ strikes/min), would implement async batch inserts and parallel decoders.
+| Metric | Python (v2) | Rust (v3) | Notes |
+|---|---|---|---|
+| Throughput | 200–500/min | 200–500/min | Feed-limited, not pipeline-limited |
+| Decode success | 100% | 100% | 0 failures across every measured window |
+| Feed latency (p50) | ~20 s | ~20 s | Blitzortung's own network delay; not ours |
+| Insert latency | per-row commit | ≤250 ms batch | One multi-row INSERT per flush |
+| `/strikes/recent?limit=100` | ~30 ms | **~10 ms** | Pooled connections, no per-request connect |
+| Ingest RSS | 28.5 MB | **2.5 MB** | 11× |
+| API RSS | 39.9 MB | **2.1 MB** | 19× |
+| Ingest image | 253 MB | **52 MB** | distroless `cc-debian12:nonroot` |
+| API image | 302 MB | **52 MB** | " |
 
 ---
 
 ## Technical Deep Dive
 
-### Decoder Implementation
-The feed is LZW-compressed text: every character of a frame is a compression
-code, and codepoints ≥ 256 reference a phrase dictionary built incrementally
-during decompression. `BlitzortungDecoder.lzw_decode` implements the standard
-algorithm (including the `cScSc` unknown-code case) in ~20 lines, and the
-result parses with a plain `json.loads` — no regex extraction, no field
-guessing.
+### The LZW decoder
 
-**v1 vs v2:** the first decoder modeled dictionary codes as a *fixed*
-byte-substitution table (`C4 88 → '0'`, …). Dictionary codes are positional,
-not fixed, so ~27% of strikes lost digits — most visibly trailing zeros of
-the nanosecond epoch, producing strikes dated 1975 or 2537. Replacing the
-table with real LZW took decode success from ~92% (with damaged survivors)
-to 100% with exact timestamps, verified against the live feed.
+Every character of a frame is a code. Codes < 256 are literals; codes ≥ 256
+index a phrase dictionary that is built *while decoding*: after each output,
+`previous_phrase + first_char(current_phrase)` is appended. The classic
+`cScSc` edge case (a code referencing the entry currently being defined)
+resolves to `previous + previous[0]`.
 
-**Example transformation:**
+```rust
+// crates/lightning-core/src/lzw.rs — the whole protocol
+for ch in chars {
+    let code = ch as usize;
+    let phrase = if code < 256 { ch.to_string() }
+                 else { dict.get(code - 256).cloned()
+                        .unwrap_or_else(|| previous.clone() + current) };
+    out.push_str(&phrase);
+    current = phrase.chars().next().unwrap();
+    dict.push(previous.clone() + current);
+    previous = phrase;
+}
 ```
-Frame:    {"time (then codes ≥256 referencing earlier phrases)
-Decoded:  {"time":1789362634636448800,"lat":33.403068,"lon":-107.863082,
-           "alt":0,"pol":0,"mds":10197,"mcg":182,"status":0,"region":3,
-           "sig":[40 station detections],"delay":3.4}
-```
 
-### Safety net: `normalize_epoch`
-Damaged epochs (wrong magnitude, e.g. truncated trailing zeros) are recovered
-by choosing the power-of-ten rescaling that lands closest to the current
-wall clock — valid because strikes are live. Anything still >24h off is
-rejected outright. With the LZW path this fires on 0 frames; it exists to
-keep a future protocol change from silently corrupting the table again.
+The output is plain JSON. `serde_json` parses it into a typed `RawStrike`;
+no regexes, no field guessing.
+
+### Golden tests
+
+`crates/lightning-core/tests/fixtures/frames.json` holds 40 frames captured
+from the live feed alongside the reference decoder's output. Two tests:
+
+1. Rust LZW output equals the reference **byte-for-byte** on every frame.
+2. Every frame decodes to a validated strike with a 19-digit epoch and the
+   epoch-recovery path **never fires**.
+
+If Blitzortung changes the protocol, these fail before anything reaches the
+database.
+
+### Epoch safety net
+
+`epoch::normalize` accepts any plausible ns epoch as-is. If the magnitude is
+wrong (e.g. lost trailing zeros), it picks the power-of-ten rescaling that
+lands nearest the wall clock — valid because strikes are live — and tags the
+result `Recovery::Rescaled`. `strike::from_raw` then rejects anything still
+>24 h from now. Recovery count is logged; in production it stays at 0.
+
+### Batched writes with backpressure
+
+The writer drains a bounded `mpsc(2048)` into batches of ≤50 or every 250 ms,
+whichever first, and issues one multi-row parameterized `INSERT`. If Postgres
+stalls, the channel fills and the reader's `send().await` applies
+backpressure; the socket is never read faster than we can persist. Dropped
+batches are counted in `ingestion_stats.total_failed`, not silently lost.
 
 ---
 
-# Database Schema
-
+## Database Schema
 
 | Column | Type | Description |
-|--------|------|-------------|
+|---|---|---|
 | id | BIGSERIAL | Primary key |
-| strike_time | BIGINT | Unix timestamp (microseconds) |
-| strike_timestamp | TIMESTAMP | Human-readable timestamp |
-| latitude | DOUBLE PRECISION | Latitude (-90 to 90) |
-| longitude | DOUBLE PRECISION | Longitude (-180 to 180) |
-| altitude | INTEGER | Altitude in meters (nullable) |
-| polarity | VARCHAR(50) | Strike polarity (nullable) |
-| mds | INTEGER | Multi-sensor detection score (nullable) |
-| mcg | INTEGER | Multi-sensor cloud-to-ground (nullable) |
-| inserted_at | TIMESTAMP | Record insertion time |
+| strike_time | BIGINT | Feed epoch, nanoseconds |
+| strike_timestamp | TIMESTAMP | Decoded UTC instant |
+| latitude / longitude | DOUBLE PRECISION | Checked constraints on range |
+| altitude | INTEGER | Meters (nullable) |
+| polarity | VARCHAR(50) | Feed `pol` field (nullable) |
+| mds / mcg | INTEGER | Feed deviation metrics (nullable) |
+| stations | SMALLINT | Number of detecting stations (`len(sig)`) |
+| region | SMALLINT | Blitzortung region id |
+| delay_s | REAL | Feed-reported network delay |
+| inserted_at | TIMESTAMP | Ingestion time |
 
-**Indexes:**
-- `idx_strike_timestamp` - Optimized for time-based queries
-- `idx_location` - Optimized for spatial queries
-- `idx_inserted_at` - Optimized for recent data retrieval
+Indexes: `strike_timestamp DESC`, `(latitude, longitude)`, `inserted_at DESC`.
+Schema setup is idempotent (`CREATE … IF NOT EXISTS`, `ADD COLUMN IF NOT
+EXISTS`), so the Rust services run against a volume created by the Python
+version without migration.
 
 ---
+
 ## Production Considerations
 
-If deploying this for enterprise use, I would add:
+What I'd add for enterprise deployment:
 
-**Scalability**
-- Horizontal scaling with message queue (Kafka/RabbitMQ) between ingestion and storage
-- Read replicas for query load distribution
-- Connection pooling with pgBouncer
-
-**Observability**  
-- Structured logging (JSON format) with correlation IDs
-- Prometheus metrics export for Grafana dashboards
-- Distributed tracing for request flow analysis
-
-**Data Quality**
-- Dead letter queue for failed decodes with manual review pipeline
-- Data validation service comparing against Blitzortung's map UI
-- Automated alerting for decode success rate drops below threshold
-
-**Security**
-- API authentication (JWT tokens)
-- Rate limiting per client (Redis-based)
-- TLS/SSL for all connections
-- Secrets management (AWS Secrets Manager / HashiCorp Vault)
-
----
-
-## Project Structure
-
-```
-lightning-data-pipeline/
-├── docker-compose.yml       # Orchestration for ingestion, API, and database
-├── Dockerfile.ingestion     # Container for WebSocket client + decoder
-├── Dockerfile.api           # Container for FastAPI REST service
-├── ingest.py               # WebSocket client with binary decoder
-├── api.py                  # FastAPI endpoints and database queries
-└── README.md               # This file
-```
-
----
-
-## Future Enhancements
-
-**If I had another week:**
-1. **Geographic Filtering API** - `/strikes/near?lat=X&lon=Y&radius=50km` endpoint (30 min implementation)
-2. **Pytest Test Suite** - Unit tests for decoder, integration tests for API endpoints
-3. **TimescaleDB Migration** - Hypertables for 10x time-series query performance
-4. **Grafana Dashboard** - Real-time visualization of ingestion rate, success rate, geographic distribution
-
-**For production deployment:**
-5. **CI/CD Pipeline** - GitHub Actions for automated testing and deployment
-6. **Cloud Infrastructure** - Terraform scripts for AWS deployment (RDS, ECS, ALB)
-7. **Monitoring Stack** - Prometheus + Grafana + Alertmanager for SLA tracking
+- **Scale:** Kafka between ingest and storage; TimescaleDB hypertables;
+  read replicas behind the API
+- **Observability:** Prometheus `/metrics` from both services (batch sizes,
+  channel depth, decode failures, recovery count); JSON logs with trace IDs
+- **Data quality:** dead-letter table for rejected frames; alert when decode
+  success drops below 99.9% or recovery count becomes non-zero
+- **Security:** API auth, per-client rate limiting, TLS to Postgres, secrets
+  from a vault rather than compose env
 
 ---
 
 ## Acknowledgments
 
-**Blitzortung.org** - Global lightning detection network providing the WebSocket data feed
-
----
-
-## Contact
-
-Kevin Kiyo  
-[kevinkpyo@gmail.com](mailto:kevinkpyo@gmail.com)  
-[LinkedIn](https://www.linkedin.com/in/kevin-pyo/) | [GitHub](https://github.com/kevinkiyosepyo)
+**Blitzortung.org** — community lightning detection network providing the feed.

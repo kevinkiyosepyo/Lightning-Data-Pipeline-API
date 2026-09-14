@@ -1,0 +1,12 @@
+[package]
+name = "lightning-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Blitzortung LZW decoder, strike model, and validation shared by the ingest and API services"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
