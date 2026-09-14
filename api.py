@@ -45,6 +45,9 @@ class LightningStrike(BaseModel):
     polarity: Optional[str] = None
     mds: Optional[int] = None
     mcg: Optional[int] = None
+    stations: Optional[int] = None
+    region: Optional[int] = None
+    delay_s: Optional[float] = None
     inserted_at: datetime
 
 class StrikeStats(BaseModel):
@@ -169,16 +172,21 @@ def get_recent_strikes(
     minutes: int = Query(60, ge=1, le=1440, description="Get strikes from last N minutes"),
     limit: int = Query(100, ge=1, le=1000, description="Maximum number of strikes")
 ):
-    """Get most recent lightning strikes."""
-    since = datetime.utcnow() - timedelta(minutes=minutes)
-    
+    """Get most recent lightning strikes.
+
+    Ordered by inserted_at (ingestion time), not strike_timestamp: the upstream
+    feed can deliver corrupt/implausible strike epochs, and ordering by those
+    lets a single bad far-future row pin the top of a live feed forever.
+    """
+    since = datetime.now() - timedelta(minutes=minutes)
+
     try:
         conn = get_db_connection()
         with conn.cursor() as cursor:
             cursor.execute("""
                 SELECT * FROM lightning_strikes
-                WHERE strike_timestamp >= %s
-                ORDER BY strike_timestamp DESC
+                WHERE inserted_at >= %s
+                ORDER BY inserted_at DESC
                 LIMIT %s
             """, (since, limit))
             results = cursor.fetchall()

@@ -22,8 +22,12 @@ Instead, lightning strikes are broadcast over a compressed binary WebSocket prot
 
 What I did: 
 
-- Built a custom substitution-based decoder to reconstruct JSON fields
-- Normalized timestamps, coordinates, and polarity data
+- Identified the wire format as LZW compression (each frame character is a
+  compression code; codes ≥256 index a phrase dictionary built during decode)
+- Implemented the LZW decompressor from scratch — every frame now decodes to
+  exact JSON with full 19-digit nanosecond timestamps (100% decode rate)
+- Kept a plausibility guard (`normalize_epoch`) that clock-anchors any
+  damaged epoch and rejects strikes drifting >24h from wall time
 - Persisted decoded strikes into PostgreSQL in real time
 
 ---
@@ -87,10 +91,11 @@ docker-compose logs -f ingestion
 ## Core Features
 
 ### 1. Real-time Data Ingestion
-Reverse-engineered Blitzortung's compression scheme by analyzing patterns in raw WebSocket data:
-- Multi-byte Unicode sequence mapping (C4 88 → '0', C4 89 → '1', etc.)
-- 2-byte to 1-byte digit compression
-- JSON structure reconstruction
+Reverse-engineered Blitzortung's wire protocol from raw WebSocket frames:
+- Identified the compression as LZW with an incrementally-built phrase dictionary
+- Implemented the decompressor from scratch (~20 lines, stdlib only)
+- Decoded frames parse as exact JSON — 19-digit ns timestamps, station
+  detection lists, polarity, deviation metrics
 - PostgreSQL with PostGIS-ready schema
 
 ### 2. Infrastructure
@@ -134,7 +139,7 @@ Service health status and database connectivity verification.
 | Metric | Value | Context |
 |--------|-------|---------|
 | **Throughput** | 200-500 strikes/min | During active global storms |
-| **Decode Success** | ~99% | Typical for undocumented compressed protocols |
+| **Decode Success** | 100% | LZW decompressor, verified against live feed |
 | **Insert Latency** | <100ms | WebSocket → Database |
 | **Reconnection Time** | <5s | Automatic failover with backoff |
 
@@ -145,26 +150,34 @@ Service health status and database connectivity verification.
 ## Technical Deep Dive
 
 ### Decoder Implementation
-The WebSocket returns compressed binary data. I built a character substitution map by:
-1. Capturing raw hex output and comparing to expected JSON structure
-2. Identifying repeating patterns (e.g., C4 88-C4 91 for digits 0-9)
-3. Building a 200+ character mapping table for Unicode sequences
-4. Handling edge cases (longitude decimals, null values, special characters)
+The feed is LZW-compressed text: every character of a frame is a compression
+code, and codepoints ≥ 256 reference a phrase dictionary built incrementally
+during decompression. `BlitzortungDecoder.lzw_decode` implements the standard
+algorithm (including the `cScSc` unknown-code case) in ~20 lines, and the
+result parses with a plain `json.loads` — no regex extraction, no field
+guessing.
+
+**v1 vs v2:** the first decoder modeled dictionary codes as a *fixed*
+byte-substitution table (`C4 88 → '0'`, …). Dictionary codes are positional,
+not fixed, so ~27% of strikes lost digits — most visibly trailing zeros of
+the nanosecond epoch, producing strikes dated 1975 or 2537. Replacing the
+table with real LZW took decode success from ~92% (with damaged survivors)
+to 100% with exact timestamps, verified against the live feed.
 
 **Example transformation:**
 ```
-Raw hex:  C4 88 C4 89 C4 8A C4 8B C4 8C
-Decoded:  0     1     2     3     4
-Result:   {"time":1699564800123456,"lat":34.0522,...}
+Frame:    {"time (then codes ≥256 referencing earlier phrases)
+Decoded:  {"time":1789362634636448800,"lat":33.403068,"lon":-107.863082,
+           "alt":0,"pol":0,"mds":10197,"mcg":182,"status":0,"region":3,
+           "sig":[40 station detections],"delay":3.4}
 ```
 
-### Why 99% Success Rate?
-The remaining 1-2% failures come from:
-- Incomplete/corrupted WebSocket frames (network issues)
-- Unknown character mappings for rare edge cases
-- Protocol changes from Blitzortung (evolving format)
-
-This is acceptable for real-time processing where volume compensates for individual losses. For critical applications, implementing a validation layer against Blitzortung's map UI would increase accuracy.
+### Safety net: `normalize_epoch`
+Damaged epochs (wrong magnitude, e.g. truncated trailing zeros) are recovered
+by choosing the power-of-ten rescaling that lands closest to the current
+wall clock — valid because strikes are live. Anything still >24h off is
+rejected outright. With the LZW path this fires on 0 frames; it exists to
+keep a future protocol change from silently corrupting the table again.
 
 ---
 

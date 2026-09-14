@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  /* Standalone fallback: when opened outside Hermes (no injected theme vars),
+     JS adds .standalone to <html> and these take over. */
+  html.standalone { --foreground:#e7e9ee; --muted-foreground:#8b919e; --accent:#f59e0b;
+                    --border:#262b35; --card:#151920; }
+  html.standalone body { background:#0e1116; margin:0; padding:18px;
+                         font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { font-family: inherit; color: var(--foreground); max-width: 760px; }
+  .hdr { display:flex; align-items:baseline; gap:10px; margin-bottom:4px; }
+  .dot { width:9px; height:9px; border-radius:50%; background:#22c55e; display:inline-block;
+         animation:pulse 1.4s ease-in-out infinite; }
+  .dot.down { background:#ef4444; animation:none; }
+  @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.35;transform:scale(.8)} }
+  h2 { margin:0; font-size:15px; font-weight:600; letter-spacing:-.01em; }
+  .sub { font-size:12px; color:var(--muted-foreground); }
+  .pipe { font-size:11px; color:var(--muted-foreground); margin-bottom:12px; display:flex; gap:6px; flex-wrap:wrap; }
+  .pipe b { color:var(--foreground); font-weight:500; }
+
+  .cards { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; margin-bottom:10px; }
+  .card { border:1px solid var(--border); border-radius:9px; padding:8px 10px; background:var(--card); }
+  .k { font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted-foreground); }
+  .v { font-size:18px; font-weight:600; margin-top:2px; font-variant-numeric:tabular-nums; }
+  .v small { font-size:10px; font-weight:400; color:var(--muted-foreground); }
+  .trend { height:26px; margin-top:4px; }
+
+  .maprow { display:grid; grid-template-columns: 1fr 168px; gap:8px; margin-bottom:10px; }
+  .mapbox { border:1px solid var(--border); border-radius:9px; background:var(--card); padding:6px; position:relative; }
+  #map { width:100%; display:block; }
+  .maplegend { position:absolute; right:9px; bottom:7px; font-size:9px; color:var(--muted-foreground); }
+  .regions { border:1px solid var(--border); border-radius:9px; background:var(--card); padding:9px 11px; }
+  .regions h3 { margin:0 0 7px; font-size:10px; text-transform:uppercase; letter-spacing:.06em;
+                color:var(--muted-foreground); font-weight:500; }
+  .rrow { display:flex; align-items:center; gap:6px; font-size:11px; margin-bottom:5px; }
+  .rname { width:52px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .rbar { flex:1; height:5px; border-radius:3px; background: color-mix(in srgb, var(--border) 55%, transparent); overflow:hidden; }
+  .rfill { height:100%; border-radius:3px; background:#f59e0b; transition:width .6s ease; }
+  .rn { width:26px; text-align:right; font-variant-numeric:tabular-nums; color:var(--muted-foreground); font-size:10px; }
+
+  table { width:100%; border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; }
+  th { text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:.05em;
+       color:var(--muted-foreground); font-weight:500; padding:4px 8px; border-bottom:1px solid var(--border); }
+  td { padding:4px 8px; border-bottom:1px solid var(--border); }
+  tr.new td { animation:flash .8s ease-out; }
+  @keyframes flash { from { background: color-mix(in srgb, var(--accent) 55%, transparent); } to { background:transparent; } }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11px; }
+  .dim { color:var(--muted-foreground); }
+  .conf { display:inline-block; width:34px; height:4px; border-radius:2px;
+          background: color-mix(in srgb, var(--border) 55%, transparent); vertical-align:middle; overflow:hidden; }
+  .conf i { display:block; height:100%; background:#22c55e; }
+  .err { color:#ef4444; }
+  .foot { font-size:11px; color:var(--muted-foreground); margin-top:9px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hdr"><span class="dot" id="live"></span><h2>Lightning strike pipeline — live</h2></div>
+  <div class="pipe">
+    <span><b>Blitzortung</b> WebSocket</span><span>→</span>
+    <span><b>LZW</b> decode</span><span>→</span>
+    <span><b>Postgres</b></span><span>→</span>
+    <span><b>FastAPI</b></span><span>→</span>
+    <span>this page (1s poll)</span>
+  </div>
+
+  <div class="cards">
+    <div class="card"><div class="k">Stored</div><div class="v" id="total">—</div></div>
+    <div class="card"><div class="k">Rate <small>smoothed</small></div><div class="v" id="rate">—<small> /min</small></div>
+      <canvas class="trend" id="spark"></canvas></div>
+    <div class="card"><div class="k">Decode OK</div><div class="v" id="succ">—<small>%</small></div></div>
+    <div class="card"><div class="k">Feed latency <small>p50</small></div><div class="v" id="lat">—<small>s</small></div></div>
+    <div class="card"><div class="k">Stations <small>median/strike</small></div><div class="v" id="stn">—</div></div>
+  </div>
+
+  <div class="maprow">
+    <div class="mapbox">
+      <canvas id="map"></canvas>
+      <div class="maplegend">last 15 min · dots fade with age</div>
+    </div>
+    <div class="regions"><h3>Last 100 strikes</h3><div id="rbars"></div></div>
+  </div>
+
+  <table>
+    <thead><tr><th>UTC</th><th>Lat</th><th>Lon</th><th>Region</th><th>Stations</th><th>Conf</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="6" class="sub">connecting…</td></tr></tbody>
+  </table>
+  <div class="foot" id="foot">—</div>
+</div>
+
+<script>
+if (!getComputedStyle(document.documentElement).getPropertyValue('--foreground').trim())
+  document.documentElement.classList.add('standalone');
+const API = 'http://localhost:8000';
+const REFRESH_MS = 1000;
+const RATE_WINDOW_MS = 15000;
+let seen = new Set(), samples = [], rateHist = [], inFlight = false, mapStrikes = new Map();
+
+function region(la, lo) {
+  if (la > 7 && la < 84 && lo > -170 && lo < -52) return 'N. America';
+  if (la > -56 && la <= 13 && lo > -82 && lo < -34) return 'S. America';
+  if (la > 35 && la < 71 && lo > -10 && lo <= 40)  return 'Europe';
+  if (la > -35 && la < 37 && lo > -18 && lo < 52 && !(la > 35 && lo < 40)) return 'Africa';
+  if (la > 5  && la < 78 && lo >= 52 && lo < 180)  return 'Asia';
+  if (la > -50 && la <= 5 && lo > 110 && lo < 180) return 'Oceania';
+  return 'Ocean/other';
+}
+
+/* ---- map: equirectangular projection, no external tiles ---- */
+const COAST = [ // ultra-coarse continent outlines [lon,lat] polylines
+ [[-168,66],[-140,60],[-125,49],[-117,33],[-105,20],[-97,16],[-83,9],[-77,8],[-75,10],[-71,12],[-64,10],[-61,5],[-52,4],[-44,-3],[-35,-8],[-39,-14],[-41,-22],[-48,-28],[-53,-34],[-58,-39],[-65,-41],[-66,-47],[-69,-52],[-74,-50],[-73,-44],[-71,-37],[-70,-30],[-70,-18],[-76,-14],[-81,-5],[-80,1],[-77,7],[-83,9]],
+ [[-83,9],[-90,14],[-96,16],[-105,20],[-110,23],[-114,28],[-117,33],[-122,37],[-124,43],[-125,49],[-128,51],[-132,55],[-140,60],[-153,59],[-166,62],[-168,66],[-161,70],[-140,70],[-125,72],[-110,73],[-95,72],[-85,70],[-75,72],[-68,70],[-65,60],[-60,50],[-65,45],[-70,43],[-75,38],[-80,32],[-81,26],[-84,30],[-89,30],[-94,29],[-97,26],[-97,22],[-90,21],[-87,17],[-83,9]],
+ [[-9,36],[-9,43],[-2,44],[0,47],[-5,48],[-1,50],[3,52],[8,54],[11,56],[18,60],[22,63],[26,66],[30,70],[40,68],[45,67],[55,68],[70,68],[85,70],[100,72],[115,73],[130,72],[145,70],[160,68],[170,66],[175,64],[180,62]],
+ [[-9,36],[-6,36],[0,38],[5,38],[10,38],[15,38],[20,37],[23,36],[27,37],[30,36],[36,36],[36,33],[34,27],[33,22],[37,18],[43,12],[51,12],[60,25],[57,20],[67,24],[72,20],[77,8],[80,6],[80,10],[87,21],[91,22],[95,16],[98,8],[100,3],[104,1],[103,5],[100,8],[100,14],[106,10],[109,13],[108,18],[110,21],[115,23],[120,26],[122,31],[120,35],[122,39],[125,39],[127,35],[129,35],[127,40],[130,43],[135,45],[140,48],[142,53],[147,54],[153,59],[157,62],[162,60],[164,56],[170,60],[178,64],[180,62]],
+ [[36,33],[32,31],[25,32],[18,31],[10,34],[10,37],[6,37],[0,36],[-6,35],[-10,31],[-15,27],[-17,21],[-17,15],[-15,11],[-8,5],[-4,5],[4,6],[9,4],[9,-1],[12,-6],[13,-12],[12,-17],[15,-22],[17,-29],[19,-34],[25,-34],[28,-32],[32,-29],[35,-25],[37,-18],[40,-15],[40,-10],[42,-2],[45,1],[51,11],[43,12],[37,18],[33,22],[34,27],[36,33]],
+ [[113,-22],[115,-30],[118,-32],[123,-34],[129,-32],[133,-32],[137,-35],[140,-38],[145,-38],[148,-38],[150,-34],[153,-30],[153,-26],[150,-22],[146,-18],[142,-14],[141,-12],[136,-12],[132,-11],[128,-14],[122,-16],[117,-20],[113,-22]],
+ [[68,66],[65,70],[60,68],[55,68]] ];
+function drawMap() {
+  const cv = document.getElementById('map');
+  const w = cv.parentElement.clientWidth - 12, h = Math.round(w * 0.52);
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = w * dpr; cv.height = h * dpr;
+  cv.style.height = h + 'px';
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const X = lo => (lo + 180) / 360 * w;
+  const Y = la => (90 - la) / 180 * h * (180/150) - h * (12/150); // crop poles: show 78N..72S
+
+  // graticule
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--border') || '#444';
+  ctx.globalAlpha = 0.35; ctx.lineWidth = 0.5;
+  for (let lo = -120; lo <= 120; lo += 60) { ctx.beginPath(); ctx.moveTo(X(lo), 0); ctx.lineTo(X(lo), h); ctx.stroke(); }
+  for (let la = -60; la <= 60; la += 30) { ctx.beginPath(); ctx.moveTo(0, Y(la)); ctx.lineTo(w, Y(la)); ctx.stroke(); }
+  ctx.globalAlpha = 0.85; ctx.lineWidth = 1;
+  for (const line of COAST) {
+    ctx.beginPath();
+    line.forEach(([lo, la], i) => i ? ctx.lineTo(X(lo), Y(la)) : ctx.moveTo(X(lo), Y(la)));
+    ctx.stroke();
+  }
+
+  // strikes: gold fading to nothing over 15 min, fresh ones ringed
+  const now = Date.now();
+  for (const [id, s] of mapStrikes) {
+    const age = (now - s.at) / 900000; // 0..1 over 15 min
+    if (age > 1) { mapStrikes.delete(id); continue; }
+    const x = X(s.lon), y = Y(s.lat);
+    ctx.globalAlpha = 0.9 * (1 - age) + 0.08;
+    ctx.fillStyle = '#f59e0b';
+    ctx.beginPath(); ctx.arc(x, y, age < 0.03 ? 3 : 1.6, 0, 7); ctx.fill();
+    if (age < 0.03) { ctx.strokeStyle = '#f59e0b'; ctx.globalAlpha = 0.5;
+      ctx.beginPath(); ctx.arc(x, y, 6, 0, 7); ctx.stroke(); }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawSpark() {
+  const cv = document.getElementById('spark');
+  const w = cv.clientWidth || 120, h = 26, dpr = window.devicePixelRatio || 1;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (rateHist.length < 2) return;
+  const max = Math.max(...rateHist, 1);
+  ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 1.2; ctx.beginPath();
+  rateHist.forEach((v, i) => {
+    const x = i / (rateHist.length - 1) * w, y = h - 2 - (v / max) * (h - 5);
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  });
+  ctx.stroke();
+}
+
+async function tick() {
+  if (inFlight) return;
+  inFlight = true;
+  try {
+    const [rs, st] = await Promise.all([
+      fetch(`${API}/strikes/recent?limit=100&minutes=30`).then(r => r.json()),
+      fetch(`${API}/ingestion/stats`).then(r => r.json())
+    ]);
+    document.getElementById('live').className = 'dot';
+    document.getElementById('total').textContent = st.total_stored.toLocaleString();
+    document.getElementById('succ').textContent  = (st.success_rate ?? 0).toFixed(1);
+
+    const now = Date.now();
+    samples.push({ t: now, v: st.total_stored });
+    while (samples.length > 2 && now - samples[0].t > RATE_WINDOW_MS) samples.shift();
+    const first = samples[0];
+    if (samples.length > 1 && now > first.t) {
+      const perMin = Math.max(0, (st.total_stored - first.v) / ((now - first.t) / 60000));
+      document.getElementById('rate').textContent = Math.round(perMin);
+      rateHist.push(perMin);
+      if (rateHist.length > 120) rateHist.shift();
+      drawSpark();
+    }
+
+    if (rs.length) {
+      const lags = rs.map(s => (new Date(s.inserted_at) - new Date(s.strike_timestamp)) / 1000)
+                     .filter(v => isFinite(v) && v >= 0).sort((a, b) => a - b);
+      if (lags.length) document.getElementById('lat').textContent =
+        Math.round(lags[Math.floor(lags.length / 2)]);
+      const stns = rs.map(s => s.stations).filter(v => v != null).sort((a, b) => a - b);
+      document.getElementById('stn').textContent =
+        stns.length ? stns[Math.floor(stns.length / 2)] : '—';
+    }
+
+    // region bars over the last 100
+    const counts = {};
+    for (const s of rs) { const r = region(s.latitude, s.longitude); counts[r] = (counts[r] || 0) + 1; }
+    const top = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 6);
+    const maxN = top.length ? top[0][1] : 1;
+    document.getElementById('rbars').innerHTML = top.map(([n, c]) =>
+      `<div class="rrow"><span class="rname">${n}</span><span class="rbar">
+       <span class="rfill" style="width:${(c / maxN * 100).toFixed(0)}%"></span></span>
+       <span class="rn">${c}</span></div>`).join('');
+
+    // feed the map
+    for (const s of rs) if (!mapStrikes.has(s.id))
+      mapStrikes.set(s.id, { lat: s.latitude, lon: s.longitude, at: new Date(s.inserted_at + 'Z').getTime() || now });
+    drawMap();
+
+    // table: newest 14
+    const tb = document.getElementById('rows');
+    tb.innerHTML = '';
+    for (const s of rs.slice(0, 14)) {
+      const tr = document.createElement('tr');
+      if (!seen.has(s.id)) { tr.className = 'new'; seen.add(s.id); }
+      const conf = s.stations != null ? Math.min(100, s.stations / 50 * 100) : null;
+      tr.innerHTML = `<td class="mono">${s.strike_timestamp.slice(11, 19)}</td>
+        <td class="mono">${s.latitude.toFixed(4)}</td>
+        <td class="mono">${s.longitude.toFixed(4)}</td>
+        <td>${region(s.latitude, s.longitude)}</td>
+        <td class="mono">${s.stations ?? '<span class="dim">—</span>'}</td>
+        <td>${conf != null ? `<span class="conf"><i style="width:${conf}%"></i></span>` : '<span class="dim">—</span>'}</td>`;
+      tb.appendChild(tr);
+    }
+    if (seen.size > 2000) seen = new Set(rs.map(s => s.id));
+    document.getElementById('foot').textContent =
+      `updated ${new Date().toLocaleTimeString()} · ordered by ingestion time · conf = detecting stations / 50 · refreshes every 1s`;
+  } catch (e) {
+    document.getElementById('live').className = 'dot down';
+    document.getElementById('foot').innerHTML =
+      `<span class="err">API unreachable — is the stack up? (${e.message})</span>`;
+  } finally {
+    inFlight = false;
+  }
+}
+tick(); setInterval(tick, REFRESH_MS);
+window.addEventListener('resize', drawMap);
+</script>
+</body>
+</html>

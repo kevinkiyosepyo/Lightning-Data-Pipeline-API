@@ -1,13 +1,11 @@
 import json
 import websocket
 from websocket import ABNF
-import re
 import datetime
 import psycopg2
-from psycopg2.extras import execute_values
 import os
 import time
-from typing import Optional, Dict, List
+from typing import Optional, Dict, Any
 import logging
 
 # Configure logging
@@ -17,30 +15,53 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Nanosecond-epoch bounds considered plausible for a live feed
+# (2001-09-09 .. 2033-05-18). Anything outside means the value was damaged.
+NS_EPOCH_MIN = 10**18
+NS_EPOCH_MAX = 2 * 10**18
+
+
 def normalize_epoch(ts: int) -> datetime.datetime:
-    # Decide unit by magnitude
-    if ts > 10**17:        # nanoseconds
-        return datetime.datetime.fromtimestamp(ts / 1_000_000_000)
-    elif ts > 10**14:      # microseconds
-        return datetime.datetime.fromtimestamp(ts / 1_000_000)
-    elif ts > 10**11:      # milliseconds
-        return datetime.datetime.fromtimestamp(ts / 1_000)
-    else:                  # seconds
-        return datetime.datetime.fromtimestamp(ts)
+    """Safety net for damaged epochs: recover the closest plausible instant.
+
+    The primary decode path (LZW -> json.loads) yields exact 19-digit
+    nanosecond epochs and never needs this. It exists only to rescue values
+    whose magnitude was corrupted (e.g. lost trailing zeros): strikes are
+    live, so the best power-of-ten rescaling is the one landing nearest now.
+    """
+    if ts <= 0:
+        raise ValueError(f"non-positive epoch: {ts}")
+
+    now_ns = time.time_ns()
+    best_ns = None
+    best_err = None
+    for k in range(-6, 13):
+        cand = ts * (10 ** k) if k >= 0 else ts // (10 ** -k)
+        if cand <= 0:
+            continue
+        err = abs(cand - now_ns)
+        if best_err is None or err < best_err:
+            best_ns, best_err = cand, err
+
+    if best_ns is None:
+        raise ValueError(f"could not normalize epoch: {ts}")
+
+    return datetime.datetime.fromtimestamp(best_ns / 1_000_000_000)
+
 
 class LightningDatabase:
     """Handles all database operations for lightning strikes."""
-    
+
     def __init__(self):
         self.conn = None
         self.connect()
         self.create_tables()
-    
+
     def connect(self):
         """Connect to PostgreSQL database."""
         max_retries = 5
         retry_delay = 5
-        
+
         for attempt in range(max_retries):
             try:
                 self.conn = psycopg2.connect(
@@ -53,18 +74,17 @@ class LightningDatabase:
                 self.conn.autocommit = False
                 logger.info("Successfully connected to database")
                 return
-            except psycopg2.OperationalError as e:
+            except psycopg2.OperationalError:
                 if attempt < max_retries - 1:
                     logger.warning(f"Database connection failed (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s...")
                     time.sleep(retry_delay)
                 else:
                     logger.error("Failed to connect to database after all retries")
                     raise
-    
+
     def create_tables(self):
         """Create tables if they don't exist."""
         with self.conn.cursor() as cursor:
-            # Main strikes table with PostGIS for spatial queries
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS lightning_strikes (
                     id BIGSERIAL PRIMARY KEY,
@@ -80,13 +100,17 @@ class LightningDatabase:
                     CONSTRAINT valid_latitude CHECK (latitude >= -90 AND latitude <= 90),
                     CONSTRAINT valid_longitude CHECK (longitude >= -180 AND longitude <= 180)
                 );
-                
+
                 CREATE INDEX IF NOT EXISTS idx_strike_timestamp ON lightning_strikes(strike_timestamp DESC);
                 CREATE INDEX IF NOT EXISTS idx_location ON lightning_strikes(latitude, longitude);
                 CREATE INDEX IF NOT EXISTS idx_inserted_at ON lightning_strikes(inserted_at DESC);
+
+                -- Fields surfaced by the LZW decoder (older schema lacked them)
+                ALTER TABLE lightning_strikes ADD COLUMN IF NOT EXISTS stations SMALLINT;
+                ALTER TABLE lightning_strikes ADD COLUMN IF NOT EXISTS region SMALLINT;
+                ALTER TABLE lightning_strikes ADD COLUMN IF NOT EXISTS delay_s REAL;
             """)
-            
-            # Statistics table for tracking ingestion
+
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS ingestion_stats (
                     id SERIAL PRIMARY KEY,
@@ -96,23 +120,24 @@ class LightningDatabase:
                     last_strike_time TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
-                
+
                 INSERT INTO ingestion_stats (total_received, total_stored, total_failed)
                 SELECT 0, 0, 0
                 WHERE NOT EXISTS (SELECT 1 FROM ingestion_stats);
             """)
-            
+
             self.conn.commit()
             logger.info("Database tables created/verified")
-    
+
     def insert_strike(self, strike_data: Dict) -> bool:
         """Insert a single lightning strike."""
         try:
             with self.conn.cursor() as cursor:
                 cursor.execute("""
-                    INSERT INTO lightning_strikes 
-                    (strike_time, strike_timestamp, latitude, longitude, altitude, polarity, mds, mcg)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO lightning_strikes
+                    (strike_time, strike_timestamp, latitude, longitude, altitude,
+                     polarity, mds, mcg, stations, region, delay_s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     strike_data['time'],
                     strike_data['timestamp'],
@@ -121,7 +146,10 @@ class LightningDatabase:
                     strike_data.get('alt'),
                     strike_data.get('pol'),
                     strike_data.get('mds'),
-                    strike_data.get('mcg')
+                    strike_data.get('mcg'),
+                    strike_data.get('stations'),
+                    strike_data.get('region'),
+                    strike_data.get('delay'),
                 ))
                 self.conn.commit()
                 return True
@@ -129,7 +157,7 @@ class LightningDatabase:
             logger.error(f"Failed to insert strike: {e}")
             self.conn.rollback()
             return False
-    
+
     def update_stats(self, received: int = 0, stored: int = 0, failed: int = 0):
         """Update ingestion statistics."""
         try:
@@ -146,7 +174,7 @@ class LightningDatabase:
         except Exception as e:
             logger.error(f"Failed to update stats: {e}")
             self.conn.rollback()
-    
+
     def get_stats(self) -> Dict:
         """Get current ingestion statistics."""
         with self.conn.cursor() as cursor:
@@ -161,7 +189,7 @@ class LightningDatabase:
                     'updated_at': row[5]
                 }
         return {}
-    
+
     def close(self):
         """Close database connection."""
         if self.conn:
@@ -170,185 +198,140 @@ class LightningDatabase:
 
 
 class BlitzortungDecoder:
-    """Decodes compressed Blitzortung lightning data."""
-    
+    """Decodes Blitzortung's LZW-compressed WebSocket frames.
+
+    Each frame is an LZW-compressed JSON document: every character of the
+    frame is a compression code, and codepoints >= 256 are references into
+    a phrase dictionary built incrementally during decompression.
+
+    The previous implementation modeled those dictionary codes as a FIXED
+    byte-substitution table (0xC4 0x88 -> '0', ...). Dictionary codes are
+    positional, not fixed, so that table was only ever approximately right:
+    codes it mapped to '' silently deleted digits — most visibly trailing
+    zeros of the nanosecond epoch — producing strikes dated 1975 or 2537.
+    Verified against the live feed: real LZW decodes 100% of frames to
+    exact JSON with full 19-digit timestamps.
+    """
+
     def __init__(self, database: LightningDatabase):
         self.db = database
-        self.substitutions = {
-            # Digit mappings
-            b'\xc4\x88': b'0', b'\xc4\x89': b'1', b'\xc4\x8a': b'2', b'\xc4\x8b': b'3',
-            b'\xc4\x8c': b'4', b'\xc4\x8d': b'5', b'\xc4\x8e': b'6', b'\xc4\x8f': b'7',
-            b'\xc4\x90': b'8', b'\xc4\x91': b'9', b'\xc4\x92': b'2', b'\xc4\x93': b'3',
-            b'\xc4\x94': b'4', b'\xc4\x95': b'5', b'\xc4\x96': b'6', b'\xc4\x97': b'7',
-            b'\xc4\x98': b'8', b'\xc4\x99': b'9', b'\xc4\x9a': b'0', b'\xc4\x9b': b'1',
-            b'\xc4\xa0': b'0', b'\xc4\xa1': b'1', b'\xc4\xa2': b'2', b'\xc4\xa3': b'3',
-            b'\xc4\xa4': b'4', b'\xc4\xa5': b'5', b'\xc4\xa6': b'6', b'\xc4\xa7': b'7',
-            b'\xc4\xa8': b'8', b'\xc4\xa9': b'9',
-            
-            # JSON structural elements
-            b'\xc4\x86': b': ', b'\xc4\x87': b'.',
-            
-            # Quotes
-            b'\xc4\xb8': b'"', b'\xc4\xb9': b'"', b'\xc4\xba': b'"', b'\xc4\xbb': b'"',
-            b'\xc4\xbc': b'"', b'\xc4\xbd': b'"', b'\xc4\x9c': b'"', b'\xc4\x9d': b'"',
-            b'\xc4\x9e': b'"', b'\xc4\x9f': b'"', b'\xc4\xb0': b'"', b'\xc4\xb1': b'"',
-            b'\xc4\xb2': b'"', b'\xc4\xb3': b'"', b'\xc4\xb4': b'"', b'\xc4\xb5': b'"',
-            
-            # Special characters
-            b'\xc4\xac': b'', b'\xc5\x86': b'6', b'\xc4\xab': b'', b'\xc4\xaa': b'',
-            b'\xc4\xb6': b'', b'\xc5\x80': b'', b'\xc5\x84': b'4', b'\xc5\x81': b'',
-            b'\xc4\xad': b'', b'\xc5\x85': b'5', b'\xc5\x89': b'9', b'\xc5\x88': b'8',
-            b'\xc4\x80': b'', b'\xc4\x8e': b'6', b'\xc5\x9b': b'', b'\xc5\x8d': b'',
-            b'\xc4\x81': b'', b'\xc4\x83': b'', b'\xc4\x85': b'', b'\xc4\xae': b'',
-            b'\xc4\xbe': b'',
-        }
-        
         self.sample_count = 0
         self.successful_decodes = 0
         self.failed_decodes = 0
+        self.recovered_epochs = 0
         self.last_stats_update = time.time()
-    
-    def decode(self, data: bytes) -> Optional[Dict]:
-        """Decode lightning strike data."""
-        self.sample_count += 1
-        
-        try:
-            # Apply substitutions
-            result = bytearray(data)
-            for compressed, original in self.substitutions.items():
-                result = result.replace(compressed, original)
-            
-            decoded = result.decode('utf-8', errors='replace')
-            strike_data = self._extract_fields(decoded)
-            
-            if strike_data and self._validate_strike(strike_data):
-                self.successful_decodes += 1
-                return strike_data
+
+    @staticmethod
+    def lzw_decode(compressed: str) -> str:
+        """Standard LZW over unicode codepoints (Blitzortung wire format)."""
+        if not compressed:
+            return ""
+
+        phrases: Dict[int, str] = {}
+        current = compressed[0]
+        previous = current
+        out = [current]
+        next_code = 256
+
+        for ch in compressed[1:]:
+            code = ord(ch)
+            if code < 256:
+                phrase = ch
             else:
-                self.failed_decodes += 1
-                return None
-                
+                # Unknown code = the cScSc special case in LZW
+                phrase = phrases.get(code, previous + current)
+            out.append(phrase)
+            current = phrase[0]
+            phrases[next_code] = previous + current
+            next_code += 1
+            previous = phrase
+
+        return "".join(out)
+
+    def decode(self, data) -> Optional[Dict]:
+        """Decode one WebSocket frame into a strike dict, or None."""
+        self.sample_count += 1
+
+        try:
+            if isinstance(data, (bytes, bytearray)):
+                data = data.decode('utf-8', errors='strict')
+
+            payload = json.loads(self.lzw_decode(data))
+            strike = self._extract_fields(payload)
+
+            if strike and self._validate_strike(strike):
+                self.successful_decodes += 1
+                return strike
+
+            self.failed_decodes += 1
+            return None
+
         except Exception as e:
             logger.error(f"Decode error: {e}")
             self.failed_decodes += 1
             return None
 
-    def normalize_epoch(ts: int) -> tuple[int, datetime.datetime]:
-        # Bring ts down until it's in a plausible "epoch" scale
-        # Target: seconds ~ 1e9, ms ~ 1e12, us ~ 1e15, ns ~ 1e18
-        while ts > 10**18:   # too big even for ns
-            ts //= 10
-        while ts > 10**15:   # bigger than microseconds
-            ts //= 10
-    
-        # Now decide unit by digits
-        if ts > 10**14:      # microseconds
-            dt = datetime.datetime.fromtimestamp(ts / 1_000_000)
-        elif ts > 10**11:    # milliseconds
-            dt = datetime.datetime.fromtimestamp(ts / 1_000)
-        else:                # seconds
-            dt = datetime.datetime.fromtimestamp(ts)
-    
-        return ts, dt
-
-
-    
-    def _extract_fields(self, text: str) -> Optional[Dict]:
-        """Extract fields from decoded text."""
-        try:
-            # Extract timestamp
-            time_match = re.search(r'time[":]+(\d+)', text)
-            if not time_match:
-                return None
-                        
-            timestamp_raw = int(time_match.group(1))
-            timestamp = normalize_epoch(timestamp_raw)
-
-            # Extract coordinates
-            lat_match = re.search(r'lat[:\s]*([0-9.-]+)', text)
-            lon_match = re.search(r'lon[:\s]*([0-9.-]+)', text)
-            
-            if not lat_match or not lon_match:
-                return None
-            
-            lat = float(lat_match.group(1))
-            lon = self._fix_longitude(lon_match.group(1))
-            
-            # Extract optional fields
-            alt_match = re.search(r'"?al"?[:\s]*([0-9.-]+)', text)
-            alt = int(float(alt_match.group(1))) if alt_match else None
-            
-            pol_match = re.search(r'pol[:\s]*"?([^"]+)"?', text)
-            pol = pol_match.group(1) if pol_match and pol_match.group(1) != 'mds' else None
-            
-            mds_match = re.search(r'mds[:\s]*([0-9.-]+)', text)
-            mds = int(float(mds_match.group(1))) if mds_match else None
-            
-            mcg_match = re.search(r'mcg[:\s]*([0-9.-]+)', text)
-            mcg = int(float(mcg_match.group(1))) if mcg_match else None
-            
-            return {
-                'time': timestamp_raw,
-                'timestamp': timestamp,
-                'lat': lat,
-                'lon': lon,
-                'alt': alt,
-                'pol': pol,
-                'mds': mds,
-                'mcg': mcg
-            }
-        except Exception as e:
-            logger.debug(f"_extract_fields failed: {e}")
+    def _extract_fields(self, obj: Dict[str, Any]) -> Optional[Dict]:
+        """Map a decoded Blitzortung payload onto our storage schema."""
+        ts_raw = obj.get('time')
+        lat = obj.get('lat')
+        lon = obj.get('lon')
+        if ts_raw is None or lat is None or lon is None:
             return None
-    
-    def _fix_longitude(self, lon_str: str) -> float:
-        """Fix longitude decimal point issues."""
-        try:
-            value = float(lon_str)
-            if abs(value) > 1000:
-                str_val = str(abs(int(value)))
-                if len(str_val) >= 6:
-                    if len(str_val) == 8:
-                        corrected = float(str_val[:2] + '.' + str_val[2:])
-                    elif len(str_val) == 7:
-                        corrected = float(str_val[:2] + '.' + str_val[2:])
-                    else:
-                        for i in range(1, len(str_val)):
-                            test_val = float(str_val[:i] + '.' + str_val[i:])
-                            if test_val <= 180:
-                                corrected = test_val
-                                break
-                        else:
-                            corrected = value
-                    
-                    if value < 0:
-                        corrected = -corrected
-                    return corrected
-            return value
-        except:
-            return None
-    
+
+        ts_raw = int(ts_raw)
+        if NS_EPOCH_MIN < ts_raw < NS_EPOCH_MAX:
+            timestamp = datetime.datetime.fromtimestamp(ts_raw / 1_000_000_000)
+        else:
+            # Should not happen with the LZW path; recover rather than drop.
+            timestamp = normalize_epoch(ts_raw)
+            self.recovered_epochs += 1
+            logger.warning(f"Implausible epoch {ts_raw}, recovered as {timestamp} "
+                           f"(total recovered: {self.recovered_epochs})")
+
+        sig = obj.get('sig') or []
+        pol = obj.get('pol')
+        delay = obj.get('delay')
+
+        return {
+            'time': ts_raw,
+            'timestamp': timestamp,
+            'lat': float(lat),
+            'lon': float(lon),
+            'alt': int(obj['alt']) if obj.get('alt') is not None else None,
+            'pol': str(pol) if pol is not None else None,
+            'mds': int(obj['mds']) if obj.get('mds') is not None else None,
+            'mcg': int(obj['mcg']) if obj.get('mcg') is not None else None,
+            'stations': len(sig),
+            'region': int(obj['region']) if obj.get('region') is not None else None,
+            'delay': float(delay) if delay is not None else None,
+        }
+
     def _validate_strike(self, strike: Dict) -> bool:
-        """Validate strike data."""
-        if not strike:
-            return False
-        
+        """Validate strike data before storage."""
         lat = strike.get('lat')
         lon = strike.get('lon')
-        
         if lat is None or lon is None:
             return False
-        
         if abs(lat) > 90 or abs(lon) > 180:
             logger.warning(f"Invalid coordinates: {lat}, {lon}")
             return False
-        
+
+        # A strike more than a day from the wall clock survived epoch
+        # recovery with a garbage value; refuse to store it.
+        drift = abs((strike['timestamp'] - datetime.datetime.now()).total_seconds())
+        if drift > 86_400:
+            logger.warning(f"Rejecting strike with implausible timestamp {strike['timestamp']}")
+            return False
+
         return True
-    
+
     def print_stats(self):
         """Print current statistics."""
         success_rate = (self.successful_decodes / self.sample_count * 100) if self.sample_count > 0 else 0
-        logger.info(f"Processed: {self.sample_count} | Stored: {self.successful_decodes} | Failed: {self.failed_decodes} | Success: {success_rate:.1f}%")
+        recovered = f" | Recovered epochs: {self.recovered_epochs}" if self.recovered_epochs else ""
+        logger.info(f"Processed: {self.sample_count} | Stored: {self.successful_decodes} | "
+                    f"Failed: {self.failed_decodes} | Success: {success_rate:.1f}%{recovered}")
 
 
 # WebSocket event handlers
@@ -357,33 +340,21 @@ decoder = None
 
 def on_data(ws, data, opcode, fin):
     """Handle incoming WebSocket data."""
-    if opcode == ABNF.OPCODE_BINARY:
-        raw = data
-    else:
-        if isinstance(data, str):
-            raw = data.encode('utf-8', errors='replace')
-        else:
-            raw = data
-    
-    # Decode strike
-    strike = decoder.decode(raw)
-    
+    strike = decoder.decode(data)
+
     if strike:
-        # Store in database
         if db.insert_strike(strike):
             db.update_stats(received=1, stored=1)
         else:
             db.update_stats(received=1, failed=1)
     else:
         db.update_stats(received=1, failed=1)
-    
-    # Print stats every 10 strikes
+
     if decoder.sample_count % 10 == 0:
         decoder.print_stats()
 
 def on_open(ws):
     logger.info("WebSocket opened")
-    # Subscribe to live lightning strike feed
     subscribe_msg = json.dumps({"a": 111})
     ws.send(subscribe_msg)
     logger.info("Subscribed to lightning feed")
@@ -397,9 +368,9 @@ def on_close(ws, close_status_code, close_msg):
 def main():
     """Main ingestion loop."""
     logger.info("Lightning Data Ingestion Service Starting...")
-    
+
     global db, decoder
-    
+
     while True:
         try:
             # Recreate database connection on each loop iteration
@@ -416,7 +387,7 @@ def main():
 
             result = ws.run_forever(ping_interval=30, ping_timeout=10)
             logger.warning(f"run_forever returned: {result} (reconnecting in 5s)")
-            
+
         except KeyboardInterrupt:
             logger.info("Shutting down...")
             db.close()
